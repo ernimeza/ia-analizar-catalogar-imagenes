@@ -47,10 +47,35 @@ DEVUELVE EXCLUSIVAMENTE un JSON (sin texto extra) con esta estructura EXACTA:
 Reglas:
 - "imagen_id" debe ser "imgN" (img1, img2, ...) respetando el orden de entrada.
 - "ambiente": elige exactamente UNA de:
-  ['sala', 'comedor', 'cocina', 'dormitorio', 'baño', 'lavadero',
-   'balcón', 'terraza', 'patio', 'jardín', 'cochera', 'pasillo',
-   'frente/fachada', 'amenidades', 'quincho/asador', 'pileta', 'oficina',
-   'placard/vestidor', 'playroom', 'escalera', 'plano/render', 'otro']
+  [
+  'sala', 'comedor', 'cocina', 'cocina integrada', 'kitchenette',
+  'dormitorio', 'dormitorio en suite',
+  'baño', 'toilette',
+  'lavadero', 'despensa', 'baulera', 'placard', 'vestidor',
+  'home office', 'oficina', 'recepción', 'hall de entrada', 'pasillo',
+  'escalera', 'sótano', 'altillo',
+  'balcón', 'terraza', 'azotea', 'roof garden', 'galería',
+  'patio', 'jardín', 'quincho', 'asador',
+  'cochera', 'cochera subterránea', 'estacionamiento', 'estacionamiento visitantes',
+  'pileta', 'solarium', 'gimnasio', 'sauna', 'salón', 'salón de eventos',
+  'cowork', 'sala de juegos', 'juegos infantiles', 'laundry', 'parrilla', 'parque canino',
+  'fachada', 'vista calle', 'contrafrente',
+  'plano', 'render', 'maqueta',
+  'planta libre', 'privado', 'sala de reuniones', 'auditorio', 'archivo',
+  'data center', 'sala de servidores', 'comedor de personal', 'cocina office', 'baños públicos',
+  'lote', 'terreno', 'portón', 'alambrado perimetral', 'camino interno',
+  'casa principal', 'casa de caseros', 'casa de huéspedes',
+  'galpón', 'depósito', 'taller', 'corrales', 'manga', 'caballerizas',
+  'silo', 'tanque de agua', 'aguadas', 'pozo de agua', 'arroyo', 'río', 'laguna', 'monte', 'arboleda', 'pastura', 'cultivo',
+  'club house', 'garita de acceso', 'seguridad', 'circuito cerrado (CCTV)',
+  'calles internas', 'bicicletero', 'cocheras de cortesía', 'plaza central', 'parque', 'senderos',
+  'cancha de tenis', 'cancha de pádel', 'cancha de fútbol', 'multicancha', 'laguna artificial',
+  'local comercial', 'isla comercial', 'vidriera', 'pasillo comercial', 'hall central',
+  'patio de comidas', 'restaurante', 'cafetería', 'back office', 'gerencia',
+  'área de carga y descarga', 'montacargas', 'escalera mecánica', 'ascensores', 'terraza técnica', 'cartelería', 'tótem',
+  'sala de máquinas', 'tablero eléctrico', 'grupo electrógeno',
+  'otro'
+]
 - "etiquetas": lista corta (1 a 4) con palabras sencillas, por ejemplo:
   ['iluminada', 'amplia', 'moderna', 'renovada', 'equipada', 'ordenada',
    'con vista', 'ventilada', 'integrada', 'con isla', 'suite', 'placard',

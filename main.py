@@ -136,13 +136,18 @@ async def classify_simple(
 
     messages = build_messages(image_parts)
 
+    # ── Cálculo dinámico de tokens de salida ──────────────────────────────────
+    per_image = 18      # estimado por fila (id + nivel + ambiente + etiquetas)
+    base_overhead = 400 # cabecera y estructura JSON
+    max_toks = min(base_overhead + per_image * len(image_parts), 3500)
+
     try:
         resp = openai.chat.completions.create(
             model=MODEL,
             messages=messages,
             temperature=0,
-            max_tokens=1000,  # suficiente para 50 filas cortas
-            response_format={"type": "json_object"},  # JSON garantizado
+            max_tokens=max_toks,                  # <- ajustado dinámicamente
+            response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content
         data = json.loads(content)  # debe ser JSON válido
@@ -154,5 +159,6 @@ async def classify_simple(
     data.setdefault("meta", {})
     data["meta"]["total_recibidas"] = len(raw_parts)
     data["meta"]["total_clasificadas"] = len(image_parts)
+    data["meta"]["max_tokens_usados"] = max_toks
 
     return JSONResponse(content=data)

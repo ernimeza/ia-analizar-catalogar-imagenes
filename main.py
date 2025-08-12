@@ -229,15 +229,15 @@ async def classify_upload(request: Request):
 
     try:
         resp = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0,
-            max_tokens=2000,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {"name":"ImageOrdering","schema": model_schema(), "strict": True}
-            }
-        )
+    model=MODEL,
+    messages=messages,
+    temperature=0,
+    max_completion_tokens=2000,   # ✅ compatible con GPT-5*
+    response_format={
+        "type": "json_schema",
+        "json_schema": {"name":"ImageOrdering","schema": model_schema(), "strict": True}
+    }
+)
         data = json.loads(resp.choices[0].message.content)
     except Exception as e:
         logger.exception(f"OpenAI error: {e}")

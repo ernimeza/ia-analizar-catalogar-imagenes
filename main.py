@@ -203,7 +203,7 @@ def build_user_content(property_type: str, canonical, urls: List[str]):
     }
     parts = [intro]
     for u in urls:
-        parts.append({"type": "input_image", "image_url": {"url": u}})
+    parts.append({"type": "image_url", "image_url": {"url": u}})
     return parts
 
 def _trunc(s: str, n: int = MAX_DEBUG_CHARS) -> str:

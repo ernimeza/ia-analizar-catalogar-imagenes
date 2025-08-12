@@ -228,17 +228,34 @@ async def classify_upload(request: Request):
     ]
 
     try:
+    # 1) Intento estándar (SDK actual): usa max_tokens
+    resp = client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=0,
+        max_tokens=2000,  # ← usa esto
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name":"ImageOrdering","schema": model_schema(), "strict": True}
+        }
+    )
+except Exception as e1:
+    # 2) Si el modelo pidiera max_completion_tokens, reintentamos
+    if "max_completion_tokens" in str(e1):
         resp = client.chat.completions.create(
-    model=MODEL,
-    messages=messages,
-    temperature=0,
-    max_completion_tokens=2000,   # ✅ compatible con GPT-5*
-    response_format={
-        "type": "json_schema",
-        "json_schema": {"name":"ImageOrdering","schema": model_schema(), "strict": True}
-    }
-)
-        data = json.loads(resp.choices[0].message.content)
+            model=MODEL,
+            messages=messages,
+            temperature=0,
+            max_completion_tokens=2000,  # fallback
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name":"ImageOrdering","schema": model_schema(), "strict": True}
+            }
+        )
+    else:
+        raise
+
+data = json.loads(resp.choices[0].message.content)
     except Exception as e:
         logger.exception(f"OpenAI error: {e}")
         raise HTTPException(502, f"Error llamando a OpenAI: {e}")

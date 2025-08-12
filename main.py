@@ -1,7 +1,6 @@
 # main.py
 import os, io, json, base64, sys, time, logging, contextvars
 from typing import List, Dict, Any, Optional
-from uuid import uuid4
 
 import dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -11,17 +10,17 @@ from fastapi.responses import JSONResponse
 import httpx
 from openai import OpenAI
 
-# ────────── ENV & OpenAI client ──────────
+# ───────── ENV & OpenAI ─────────
 dotenv.load_dotenv()
 for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"):
     os.environ.pop(k, None)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL = os.getenv("MODEL", "gpt-5-mini")  # o gpt-4o-mini-2024-07-18
+MODEL = os.getenv("MODEL", "gpt-5-mini")  # cambia acá el modelo que quieras
 
 client = OpenAI(api_key=OPENAI_API_KEY, http_client=httpx.Client(timeout=30.0))
 
-# ────────── Logging con request-id ──────────
+# ───────── Logging con request-id ─────────
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
 class RequestIdFilter(logging.Filter):
@@ -29,7 +28,7 @@ class RequestIdFilter(logging.Filter):
         record.request_id = request_id_ctx.get()
         return True
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 logger = logging.getLogger("app"); logger.setLevel(LOG_LEVEL)
 _handler = logging.StreamHandler(sys.stdout); _handler.setLevel(LOG_LEVEL)
 _handler.addFilter(RequestIdFilter())
@@ -37,7 +36,7 @@ _handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | req=%(req
                                         datefmt="%Y-%m-%d %H:%M:%S"))
 logger.handlers = [_handler]; logger.propagate = False
 
-# ────────── App ──────────
+# ───────── FastAPI ─────────
 app = FastAPI(
     title="Image Classifier & Sorter (Real Estate)",
     docs_url="/docs", redoc_url="/redoc", openapi_url="/openapi.json"
@@ -47,7 +46,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"]
 )
 
-# ────────── Taxonomía & esquema ──────────
+# ───────── Taxonomía ─────────
 CATEGORIES = [
     "facade_exterior","building_common","living_room","dining_room","kitchen",
     "bedroom","bathroom","home_office","laundry","garage","balcony_terrace",
@@ -123,12 +122,11 @@ def build_user_content(property_type: str, canonical: List[str], image_parts: Li
     }
     return [intro] + image_parts
 
-# ────────── Helpers ──────────
+# ───────── Helpers (files) ─────────
 def is_upload_like(v: Any) -> bool:
-    return hasattr(v, "filename") and hasattr(v, "file")  # vale Starlette/FastAPI UploadFile
+    return hasattr(v, "filename") and hasattr(v, "file")
 
 def file_to_image_part(upload_obj) -> Optional[Dict[str, Any]]:
-    """Devuelve bloque {'type':'image_url','image_url':{'url':'data:...;base64,...'}} o None."""
     if not is_upload_like(upload_obj):
         return None
     ct = (getattr(upload_obj, "content_type", None) or "").lower()
@@ -143,13 +141,13 @@ def file_to_image_part(upload_obj) -> Optional[Dict[str, Any]]:
 
 def collect_images_from_form(form) -> List[Dict[str, Any]]:
     parts: List[Dict[str, Any]] = []
-    # Primero intentamos img1..img50
+    # img1..img50  ← AQUÍ se piden las 50 imágenes
     for i in range(1, 51):
         v = form.get(f"img{i}")
         if is_upload_like(v):
             p = file_to_image_part(v)
             if p: parts.append(p)
-    # Si nada, recorremos todas las keys que empiezan con img
+    # si no vino nada, levantar cualquier key que empiece por 'img'
     if not parts:
         for k, v in form.items():
             if str(k).lower().startswith("img") and is_upload_like(v):
@@ -157,21 +155,19 @@ def collect_images_from_form(form) -> List[Dict[str, Any]]:
                 if p: parts.append(p)
     return parts
 
-# ────────── Endpoints ──────────
+# ───────── Endpoints ─────────
 @app.get("/health")
 def health():
     return {"ok": True, "model": MODEL}
 
 @app.post("/debug-upload")
 async def debug_upload(request: Request):
-    """Devuelve qué llegó exactamente en el form (para depurar desde Bubble)."""
     form = await request.form()
     items = []
     for k, v in form.items():
         if is_upload_like(v):
             items.append({"key": k, "type": "UploadFile", "filename": v.filename, "content_type": getattr(v, "content_type", None)})
         else:
-            # para no romper si es objeto raro
             try:
                 val = str(v)
             except Exception:
@@ -187,7 +183,7 @@ async def classify_upload(request: Request):
 
     form = await request.form()
 
-    # Log detallado de lo que llegó
+    # Log de lo recibido
     log_items = []
     for k, v in form.items():
         if is_upload_like(v):
@@ -227,38 +223,39 @@ async def classify_upload(request: Request):
         {"role": "user", "content": build_user_content(property_type, canonical, image_parts)}
     ]
 
+    # Llamada OpenAI con fallback de parámetro
     try:
-    # 1) Intento estándar (SDK actual): usa max_tokens
-    resp = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0,
-        max_tokens=2000,  # ← usa esto
-        response_format={
-            "type": "json_schema",
-            "json_schema": {"name":"ImageOrdering","schema": model_schema(), "strict": True}
-        }
-    )
-except Exception as e1:
-    # 2) Si el modelo pidiera max_completion_tokens, reintentamos
-    if "max_completion_tokens" in str(e1):
         resp = client.chat.completions.create(
             model=MODEL,
             messages=messages,
             temperature=0,
-            max_completion_tokens=2000,  # fallback
+            max_tokens=2000,   # SDK estable (gpt-4o, gpt-5 si lo soporta)
             response_format={
                 "type": "json_schema",
-                "json_schema": {"name":"ImageOrdering","schema": model_schema(), "strict": True}
+                "json_schema": {"name": "ImageOrdering", "schema": model_schema(), "strict": True}
             }
         )
-    else:
-        raise
+    except Exception as e1:
+        if "max_tokens is not supported" in str(e1) or "Use max_completion_tokens instead" in str(e1):
+            resp = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=0,
+                max_completion_tokens=2000,  # fallback para modelos que lo exigen
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "ImageOrdering", "schema": model_schema(), "strict": True}
+                }
+            )
+        else:
+            logger.exception(f"OpenAI error: {e1}")
+            raise HTTPException(502, f"Error llamando a OpenAI: {e1}")
 
-data = json.loads(resp.choices[0].message.content)
+    try:
+        data = json.loads(resp.choices[0].message.content)
     except Exception as e:
-        logger.exception(f"OpenAI error: {e}")
-        raise HTTPException(502, f"Error llamando a OpenAI: {e}")
+        logger.exception(f"No pude parsear JSON del modelo: {e}")
+        raise HTTPException(502, "Respuesta inválida del modelo")
 
     data.setdefault("version", "1.0")
     data["property_type"] = property_type

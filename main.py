@@ -1,4 +1,4 @@
-import os, json, base64, logging
+import os, json, base64, logging, re
 from typing import List, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
@@ -35,7 +35,6 @@ ALLOWED_AMBIENTES = [
 ]
 
 SUGERIDAS_ETIQUETAS = [
-    # descriptores genéricos y frecuentes
     "iluminada", "amplia", "moderna", "clasica", "remodelada",
     "minimalista", "con vista", "con muebles", "sin muebles",
     "piso de madera", "piso ceramico", "aire acondicionado",
@@ -45,11 +44,38 @@ SUGERIDAS_ETIQUETAS = [
     "a refaccionar"
 ]
 
+# Schema estricto para obligar JSON válido
+JSON_SCHEMA = {
+    "name": "ImagenTags",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "resultados": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "imagen_id": {"type": "string"},
+                        "ambiente":  {"type": "string", "enum": ALLOWED_AMBIENTES},
+                        "etiquetas": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 0,
+                            "maxItems": 5
+                        }
+                    },
+                    "required": ["imagen_id", "ambiente", "etiquetas"]
+                }
+            }
+        },
+        "required": ["resultados"]
+    },
+    "strict": True
+}
+
 def file_to_image_part(upload, image_id: str):
-    """
-    Convierte UploadFile a parte de mensaje (image_url data:)
-    Devuelve (parte, ok:bool). Si no es imagen o está vacío, ok=False.
-    """
     if upload is None:
         return None, False
     try:
@@ -57,24 +83,18 @@ def file_to_image_part(upload, image_id: str):
         data = upload.file.read()
     except Exception:
         return None, False
-
     if not data or not ct.startswith("image/"):
         return None, False
 
     b64 = base64.b64encode(data).decode()
     part = {
         "type": "image_url",
-        "image_url": {"url": f"data:{ct};base64,{b64}", "detail": "low"}  # low = más rápido/barato
+        "image_url": {"url": f"data:{ct};base64,{b64}", "detail": "low"}
     }
     return part, True
 
 def collect_images_from_form(form, max_n: int = 50) -> Tuple[List[dict], List[str]]:
-    """
-    Recolecta img1..imgN del form (si existen, como UploadFile).
-    Devuelve (image_parts, ids_en_orden)
-    """
     parts, ids = [], []
-    count = 0
     for i in range(1, max_n + 1):
         key = f"img{i}"
         upload = form.get(key)
@@ -84,9 +104,24 @@ def collect_images_from_form(form, max_n: int = 50) -> Tuple[List[dict], List[st
         if ok:
             parts.append(part)
             ids.append(key)
-            count += 1
-    logger.info(f"Imágenes válidas encontradas: {count}")
+    logger.info(f"Imágenes válidas encontradas: {len(parts)}")
     return parts, ids
+
+def best_effort_json(text: str):
+    """Intenta parsear; si falla, intenta recortar al primer '{' y último '}'."""
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    m1 = text.find("{")
+    m2 = text.rfind("}")
+    if m1 != -1 and m2 != -1 and m2 > m1:
+        snippet = text[m1:m2+1]
+        try:
+            return json.loads(snippet)
+        except Exception:
+            pass
+    raise
 
 # ───────────────────────── Endpoints ────────────────────────────
 @app.get("/health")
@@ -110,26 +145,19 @@ async def classify_simple(request: Request):
     if not image_parts:
         raise HTTPException(400, "Envía al menos una imagen válida (jpg/png).")
 
-    # Instrucciones al modelo (en español, bien acotado)
     system_prompt = f"""
 Eres un asistente que clasifica fotos inmobiliarias.
-Para CADA imagen recibida, debes devolver un objeto con:
+Para CADA imagen, devuelve:
 - "ambiente": uno de {ALLOWED_AMBIENTES}.
-  Si dudas, usa "otros".
-- "etiquetas": lista corta (2-5) de descriptores útiles (en minúsculas).
-  Ejemplos frecuentes: {SUGERIDAS_ETIQUETAS}.
-  Evita repetir palabras vacías; usa términos simples.
-
-Reglas de salida IMPORTANTES:
-- Devuelve SOLO un JSON con la forma:
-  {{"resultados":[{{"imagen_id":"imgX","ambiente":"...","etiquetas":["..."]}}, ...]}}
-- Mantén el MISMO ORDEN de las imágenes de entrada.
-- No incluyas texto fuera del JSON. No devuelvas las imágenes ni URLs.
+- "etiquetas": 2-5 descriptores en minúsculas, simples. Ejemplos: {SUGERIDAS_ETIQUETAS}.
+Reglas:
+- Mantén el MISMO ORDEN de entrada.
+- Responde SOLO el JSON requerido.
 """
 
     user_intro = (
         "Analiza y etiqueta estas imágenes en el orden dado. "
-        "Devuelve exactamente un elemento por imagen en el mismo orden."
+        "Devuelve exactamente un elemento por imagen."
     )
 
     messages = [
@@ -144,41 +172,37 @@ Reglas de salida IMPORTANTES:
             messages=messages,
             temperature=0,
             max_tokens=800,
-            response_format={"type": "json_object"},
+            response_format={"type": "json_schema", **JSON_SCHEMA},
         )
         content = resp.choices[0].message.content
-        data = json.loads(content)
+        data = best_effort_json(content)  # robustez extra
     except Exception as e:
         logger.exception("OpenAI error: %s", e)
         raise HTTPException(502, f"Error llamando a OpenAI: {e}")
 
-    # Validación mínima y relleno si hiciera falta
     resultados = data.get("resultados", [])
     if not isinstance(resultados, list):
         resultados = []
 
-    # Si el modelo devolvió menos items de los que enviamos, completamos con placeholders.
+    # Normalizamos longitud y campos
     if len(resultados) < len(image_ids):
-        faltan = len(image_ids) - len(resultados)
-        for i in range(faltan):
+        for i in range(len(image_ids) - len(resultados)):
             resultados.append({
                 "imagen_id": image_ids[len(resultados)],
                 "ambiente": "otros",
                 "etiquetas": []
             })
-    # Si devolvió más, recortamos.
     resultados = resultados[: len(image_ids)]
 
-    # Garantizamos que cada item tenga imagen_id correcto y campos esperados
     for idx, item in enumerate(resultados):
         item["imagen_id"] = image_ids[idx]
-        item["ambiente"] = (item.get("ambiente") or "otros").lower()
-        if item["ambiente"] not in ALLOWED_AMBIENTES:
-            item["ambiente"] = "otros"
+        amb = (item.get("ambiente") or "otros").lower()
+        if amb not in ALLOWED_AMBIENTES:
+            amb = "otros"
         et = item.get("etiquetas")
         if not isinstance(et, list):
             et = []
-        # normalizamos strings
+        item["ambiente"] = amb
         item["etiquetas"] = [str(x).lower()[:60] for x in et][:5]
 
     out = {"resultados": resultados}

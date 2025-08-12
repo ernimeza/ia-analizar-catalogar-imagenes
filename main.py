@@ -1,4 +1,5 @@
-import os, json, io, base64, time, sys, logging, contextvars
+# main.py
+import os, io, json, sys, time, logging, contextvars
 from typing import List, Optional, Dict, Any
 from uuid import uuid4
 
@@ -6,21 +7,32 @@ import dotenv
 import requests
 from PIL import Image
 import imagehash
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+
 from pydantic import BaseModel, Field
-import openai
 
-# ───────────────────────── Config .env / OpenAI ───────────────────────────────
+import httpx
+from openai import OpenAI
+
+# ──────────────────────── ENV / OpenAI client ────────────────────────────────
 dotenv.load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
-MODEL = os.getenv("MODEL", "gpt-5-mini")
-ENABLE_MODEL_DEBUG = os.getenv("ENABLE_MODEL_DEBUG", "false").lower() == "true"
-MAX_DEBUG_CHARS = int(os.getenv("MAX_DEBUG_CHARS", "3000"))
 
-# ─────────────────────────── Logging estructurado ─────────────────────────────
-# Railway muestra todo lo que va a stdout/stderr. Armamos logs con request-id.
+# Evitar proxies heredados del entorno (causan errores con httpx)
+for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(k, None)
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MODEL = os.getenv("MODEL", "gpt-5-mini")  # o gpt-4o-mini-2024-07-18
+if not OPENAI_API_KEY:
+    print("WARNING: OPENAI_API_KEY no seteado")
+
+# Cliente OpenAI con httpx controlado
+client = OpenAI(api_key=OPENAI_API_KEY, http_client=httpx.Client(timeout=30.0))
+
+# ───────────────────────── Logging estructurado ──────────────────────────────
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
 class RequestIdFilter(logging.Filter):
@@ -31,24 +43,31 @@ class RequestIdFilter(logging.Filter):
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logger = logging.getLogger("app")
 logger.setLevel(LOG_LEVEL)
-handler = logging.StreamHandler(sys.stdout)
-handler.setLevel(LOG_LEVEL)
-handler.addFilter(RequestIdFilter())
-handler.setFormatter(logging.Formatter(
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setLevel(LOG_LEVEL)
+_handler.addFilter(RequestIdFilter())
+_handler.setFormatter(logging.Formatter(
     "%(asctime)s | %(levelname)s | req=%(request_id)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 ))
-logger.handlers = [handler]
+logger.handlers = [_handler]
 logger.propagate = False
 
-# Silencia verbosidad de libs si querés
-logging.getLogger("uvicorn").setLevel(LOG_LEVEL)
-logging.getLogger("uvicorn.access").setLevel(LOG_LEVEL)
-logging.getLogger("httpx").setLevel("WARNING")
-logging.getLogger("requests").setLevel("WARNING")
+ENABLE_MODEL_DEBUG = os.getenv("ENABLE_MODEL_DEBUG", "false").lower() == "true"
+MAX_DEBUG_CHARS = int(os.getenv("MAX_DEBUG_CHARS", "3000"))
 
-# ─────────────────────────── FastAPI + CORS ───────────────────────────────────
-app = FastAPI(title="Image Classifier & Sorter (Real Estate)")
+def _trunc(s: str, n: int = MAX_DEBUG_CHARS) -> str:
+    if s is None:
+        return ""
+    return s if len(s) <= n else s[:n] + f"...(truncated {len(s)-n} chars)"
+
+# ─────────────────────────── FastAPI app ─────────────────────────────────────
+app = FastAPI(
+    title="Image Classifier & Sorter (Real Estate)",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,7 +75,6 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"]
 )
 
-# Middleware para log de request/response y tiempos
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         rid = request.headers.get("x-request-id") or str(uuid4())
@@ -78,7 +96,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(LoggingMiddleware)
 
-# ─────────────────────────── Tipos de datos ───────────────────────────────────
+# ─────────────────────────── Tipos (Pydantic) ────────────────────────────────
 class ClassifyRequest(BaseModel):
     property_id: Optional[str] = None
     property_type: str = Field(..., description="apartment | house | land | office | commercial")
@@ -109,7 +127,7 @@ class ClassifyResponse(BaseModel):
     cover_image_id: Optional[str] = None
     notes: Optional[str] = None
 
-# ─────────────────────────── Utilidades ───────────────────────────────────────
+# ─────────────────────────── Utilidades ──────────────────────────────────────
 CANONICALS = {
     "house": ["facade_exterior","living_room","kitchen","bedroom","bathroom","patio_garden","amenity_pool_gym","garage","laundry","hallway","view_window","floorplan","map","other"],
     "apartment": ["living_room","kitchen","bedroom","bathroom","balcony_terrace","amenity_pool_gym","building_common","facade_exterior","floorplan","map","other"],
@@ -125,12 +143,12 @@ CATEGORIES = [
 ]
 
 def get_canonical(pt: str, override: Optional[List[str]] = None) -> List[str]:
-    if override:
+    if override and len(override) > 0:
         return override
     return CANONICALS.get(pt.lower().strip(), CANONICALS["apartment"])
 
 def fetch_image_meta(url: str):
-    """Descarga imagen (thumb) y calcula pHash/orientación/tamaño. Loguea fallos."""
+    """Descarga imagen y calcula pHash/orientación/tamaño (best effort)."""
     try:
         r = requests.get(url, timeout=15)
         r.raise_for_status()
@@ -188,7 +206,9 @@ Devuelves SOLO JSON válido según el esquema. Tareas:
 No inventes información y no agregues campos fuera del esquema.
 """
 
-def build_user_content(property_type: str, canonical, urls: List[str]):
+def build_user_content(property_type: str, canonical: List[str], urls: List[str]):
+    """Arma el contenido multimodal para Chat Completions (texto + imágenes)."""
+    parts: List[Dict[str, Any]] = []
     intro = {
         "type": "text",
         "text": json.dumps({
@@ -201,26 +221,27 @@ def build_user_content(property_type: str, canonical, urls: List[str]):
             ]
         }, ensure_ascii=False)
     }
-    parts = [intro]
+    parts.append(intro)
     for u in urls:
-    parts.append({"type": "image_url", "image_url": {"url": u}})
+        parts.append({"type": "image_url", "image_url": {"url": u}})
     return parts
 
-def _trunc(s: str, n: int = MAX_DEBUG_CHARS) -> str:
-    if s is None:
-        return ""
-    return s if len(s) <= n else s[:n] + f"...(truncated {len(s)-n} chars)"
-
-# ─────────────────────────── Endpoints ────────────────────────────────────────
+# ─────────────────────────── Endpoints ───────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"ok": True, "model": MODEL}
+    return {
+        "ok": True,
+        "model": MODEL,
+        "openai_sdk": getattr(client, "__class__", type(client)).__name__,
+        "httpx": httpx.__version__
+    }
 
 @app.post("/classify-images", response_model=ClassifyResponse)
 def classify(req: ClassifyRequest):
-    if not openai.api_key:
+    if not OPENAI_API_KEY:
         logger.error("OPENAI_API_KEY missing")
         raise HTTPException(500, "Falta OPENAI_API_KEY")
+
     urls = [u.strip() for u in req.image_urls if isinstance(u, str) and u.strip()]
     if not urls:
         logger.warning("image_urls empty in request")
@@ -229,8 +250,6 @@ def classify(req: ClassifyRequest):
     property_type = req.property_type.lower().strip()
     canonical = get_canonical(property_type, req.canonical_order)
 
-    logger.debug(f"START classify property_type={property_type} images={len(urls)} model={MODEL}")
-
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": build_user_content(property_type, canonical, urls)}
@@ -238,15 +257,14 @@ def classify(req: ClassifyRequest):
 
     if ENABLE_MODEL_DEBUG:
         try:
-            debug_payload = json.dumps(messages, ensure_ascii=False)
-            logger.debug("OPENAI messages=" + _trunc(debug_payload))
+            logger.debug("OPENAI messages=" + _trunc(json.dumps(messages, ensure_ascii=False)))
         except Exception:
             logger.debug("OPENAI messages=(unserializable)")
 
     try:
-        resp = openai.chat.completions.create(
+        resp = client.chat.completions.create(
             model=MODEL,
-            messages=messages,
+            messages=models := messages,  # mantiene una ref por si logeamos
             temperature=0,
             max_tokens=2000,
             response_format={
@@ -262,7 +280,7 @@ def classify(req: ClassifyRequest):
         logger.exception(f"OpenAI call failed: {e}")
         raise HTTPException(502, f"Error llamando a OpenAI: {e}")
 
-    # Enriquecer con pHash/orientación/tamaño (best-effort)
+    # Enriquecer con pHash/orientación/tamaño
     url_to_meta = {}
     for u in urls:
         meta = fetch_image_meta(u)
@@ -291,3 +309,4 @@ def classify(req: ClassifyRequest):
 
     logger.info(f"DONE classify images={len(out.images)} cover={out.cover_image_id or '-'}")
     return out
+

@@ -5,20 +5,16 @@ from fastapi.responses import JSONResponse
 import openai, dotenv
 from PIL import Image
 
-# ── Credenciales ──────────────────────────────────────────────────────────────
 dotenv.load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4o-mini-2024-07-18")
 
-# Reducción de imagen (tuneable por env)
-MAX_SIDE = int(os.getenv("MAX_SIDE", "1024"))       # px lado mayor
-JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70")) # 1..95
+MAX_SIDE = int(os.getenv("MAX_SIDE", "1024"))
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70"))
 
 app = FastAPI(title="Image Room Classifier (1-50 imágenes)")
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 def to_image_part(f: UploadFile):
-    """Devuelve image_url vision con compresión/resize, o None si no es válida."""
     if not f:
         return None
     ct = (f.content_type or "").lower()
@@ -30,7 +26,6 @@ def to_image_part(f: UploadFile):
             return None
 
         im = Image.open(BytesIO(raw))
-        # Normaliza a RGB y aplana alfa
         if im.mode in ("RGBA", "LA"):
             bg = Image.new("RGB", im.size, (255, 255, 255))
             bg.paste(im, mask=im.split()[-1])
@@ -38,10 +33,7 @@ def to_image_part(f: UploadFile):
         else:
             im = im.convert("RGB")
 
-        # Resize proporcional
         im.thumbnail((MAX_SIDE, MAX_SIDE))
-
-        # JPEG liviano
         buf = BytesIO()
         im.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -50,7 +42,7 @@ def to_image_part(f: UploadFile):
             "type": "image_url",
             "image_url": {
                 "url": f"data:image/jpeg;base64,{b64}",
-                "detail": "low"  # velocidad > super detalle
+                "detail": "low"
             }
         }
     except Exception:
@@ -71,10 +63,9 @@ Reglas:
 - "ambiente": elegir UNA sola opción de la lista permitida.
 - "etiquetas": 1 a 4 palabras simples (ej.: 'iluminada','amplia','moderna','a estrenar','rústica').
 - Si no estás seguro del ambiente, usa 'otro'.
-- Nada de texto adicional ni base64; solo JSON válido.
+- Nada de texto adicional; solo JSON válido.
 """
 
-# Lista de ambientes (en minúsculas; debe coincidir con enum del esquema)
 AMBIENTES = [
     'sala','comedor','cocina','cocina integrada','kitchenette',
     'dormitorio','dormitorio en suite',
@@ -105,7 +96,6 @@ AMBIENTES = [
     'otro'
 ]
 
-# JSON Schema estricto para obligar salida válida
 JSON_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
@@ -131,10 +121,6 @@ JSON_SCHEMA = {
                         },
                         "required": ["imagen_id", "ambiente", "etiquetas"]
                     }
-                },
-                "meta": {
-                    "type": "object",
-                    "additionalProperties": True
                 }
             },
             "required": ["resultados"]
@@ -149,7 +135,6 @@ def build_messages(image_parts):
         {"role": "user",   "content": image_parts},
     ]
 
-# ── Endpoint (img1..img50) ────────────────────────────────────────────────────
 @app.post("/classify-simple")
 @app.post("/extract-image")
 async def classify_simple(
@@ -188,21 +173,19 @@ async def classify_simple(
     if not image_parts:
         raise HTTPException(400, "Envía al menos una imagen válida (jpg/png).")
 
-    messages = build_messages(image_parts)
-
     try:
         resp = openai.chat.completions.create(
             model=MODEL,
-            messages=messages,
+            messages=build_messages(image_parts),
             temperature=0,
-            max_tokens=1000,
-            response_format=JSON_SCHEMA,   # ⬅️ obliga JSON válido
+            max_tokens=900,
+            response_format=JSON_SCHEMA,
         )
         data = json.loads(resp.choices[0].message.content)
     except Exception as e:
         raise HTTPException(500, f"Error OpenAI: {e}")
 
-    # meta opcional
+    # Añadimos meta fuera del esquema del modelo
     data.setdefault("meta", {})
     data["meta"]["total_recibidas"] = len(raw_parts)
     data["meta"]["total_clasificadas"] = len(image_parts)

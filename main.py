@@ -1,28 +1,62 @@
-import os, json, base64, logging, sys, time
+import os, json, base64, logging, time
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import openai, dotenv
-
-# ── Logging para Railway ──────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger("ia-classifier")
 
 # ── Credenciales ──────────────────────────────────────────────────────────────
 dotenv.load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4o-mini-2024-07-18")
 
+# ── Logging básico ────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ia-classifier")
+
 app = FastAPI(title="Image Room Classifier (1-50 imágenes)")
 
-@app.on_event("startup")
-def _on_startup():
-    logger.info(f"App iniciada | MODEL={MODEL}")
+# ── Orden maestro de ambientes (define importancia y nivel) ──────────────────
+AMBIENTES = [
+    # Partes de la vivienda (interiores)
+    'Sala','Dormitorio','Dormitorio en suite','Cocina','Cocina integrada','Kitchenette','Comedor',
+    'Baño','Toilette','Vestidor','Placard','Lavadero','Despensa','Baulera',
+    'Oficina','Home office','Recepción','Hall de entrada','Pasillo','Escalera','Altillo','Sótano',
 
-# ── Devuelve dict si es imagen válida, o None si viene vacío/no imagen ───────
+    # Amenidades / áreas comunes
+    'Pileta','Quincho','Asador','Parrilla','Salón','Salón de eventos','Gimnasio','Sauna',
+    'Sala de juegos','Juegos infantiles','Cowork','Laundry','Solarium','Club house','Seguridad',
+    'Circuito cerrado (CCTV)','Garita de acceso','Plaza central','Parque','Senderos',
+    'Cancha de fútbol','Cancha de pádel','Cancha de tenis','Multicancha','Parque canino',
+    'Cocheras de cortesía','Calles internas','Bicicletero','Laguna artificial',
+
+    # Exteriores / cocheras / vistas
+    'Fachada','Vista calle','Contrafrente','Patio','Jardín','Balcón','Terraza','Azotea','Galería','Roof garden',
+    'Cochera','Cochera subterránea','Estacionamiento','Estacionamiento visitantes',
+
+    # Terrenos / campo
+    'Lote','Terreno','Casa principal','Casa de caseros','Casa de huéspedes','Portón','Alambrado perimetral',
+    'Camino interno','Tanque de agua','Pozo de agua','Aguadas','Laguna','Arroyo','Río','Monte','Arboleda',
+    'Pastura','Cultivo',
+
+    # Técnicos / renders / planos
+    'Plano','Render','Maqueta','Planta libre','Privado','Sala de reuniones','Auditorio','Archivo',
+    'Data center','Sala de servidores','Comedor de personal','Cocina office','Baños públicos',
+
+    # Comercial / shopping
+    'Local comercial','Isla comercial','Vidriera','Pasillo comercial','Hall central','Patio de comidas',
+    'Restaurante','Cafetería','Back office','Gerencia','Área de carga y descarga','Montacargas',
+    'Escalera mecánica','Ascensores','Terraza técnica','Cartelería','Tótem','Sala de máquinas',
+    'Tablero eléctrico','Grupo electrógeno',
+
+    # Industrial / depósitos
+    'Galpón','Depósito','Taller','Corrales','Manga','Caballerizas','Silo',
+
+    # Catch-all
+    'Otro'
+]
+# Primer elemento = 124, último = 1
+NIVEL_MAP = {name: len(AMBIENTES) - i for i, name in enumerate(AMBIENTES)}
+
+# ── Utilidad: transforma UploadFile -> content part de visión ────────────────
 def to_image_part(f: UploadFile):
     if not f:
         return None
@@ -31,78 +65,43 @@ def to_image_part(f: UploadFile):
         data = f.file.read()
     except Exception:
         return None
-    if not data:
-        return None
-    if not ct.startswith("image/"):
+    if not data or not ct.startswith("image/"):
         return None
     b64 = base64.b64encode(data).decode()
-    return {
-        "type": "image_url",
-        "image_url": {"url": f"data:{ct};base64,{b64}"}
-    }
+    return {"type": "image_url", "image_url": {"url": f"data:{ct};base64,{b64}"}}
 
-# ── Prompt del clasificador ───────────────────────────────────────────────────
-SYSTEM_MSG = """
+# ── Prompt del clasificador (se alimenta con la lista AMBIENTES) ─────────────
+def build_system_msg():
+    opciones = ", ".join(f"'{a}'" for a in AMBIENTES)
+    return f"""
 Eres un asistente que CLASIFICA fotos de propiedades inmobiliarias.
 
 DEVUELVE EXCLUSIVAMENTE un JSON (sin texto extra) con esta estructura EXACTA:
-{
+{{
   "resultados": [
-    {
+    {{
       "imagen_id": "img1",
       "nivel": <entero 1-124>,
-      "ambiente": "<una de las opciones permitidas con la primera letra en mayuscula>",
+      "ambiente": "<una de las opciones permitidas>",
       "etiquetas": ["<etiqueta1>", "<etiqueta2>"]
-    }
+    }}
   ]
-}
+}}
 
 Reglas:
 - "imagen_id" debe ser "imgN" (img1, img2, ...) respetando el orden de entrada.
-- "nivel" entero de 1 a 124 calculado por posición en la lista de ambientes (el primero vale 124 y el último vale 1); por ejemplo, 'sala' = 124 y 'otro' = 1.
-- "ambiente": elige exactamente UNA de estas opciones, pero devuelvela con la primera letra en mayuscula:
- [
-  'Sala', 'Comedor', 'Cocina', 'Cocina integrada', 'Kitchenette',
-  'Dormitorio', 'Dormitorio en suite',
-  'Baño', 'Toilette',
-  'Lavadero', 'Despensa', 'Baulera', 'Placard', 'Vestidor',
-  'Home office', 'Oficina', 'Recepción', 'Hall de entrada', 'Pasillo',
-  'Escalera', 'Sótano', 'Altillo',
-  'Balcón', 'Terraza', 'Azotea', 'Roof garden', 'Galería',
-  'Patio', 'Jardín', 'Quincho', 'Asador',
-  'Cochera', 'Cochera subterránea', 'Estacionamiento', 'Estacionamiento visitantes',
-  'Pileta', 'Solarium', 'Gimnasio', 'Sauna', 'Salón', 'Salón de eventos',
-  'Cowork', 'Sala de juegos', 'Juegos infantiles', 'Laundry', 'Parrilla', 'Parque canino',
-  'Fachada', 'Vista calle', 'Contrafrente',
-  'Plano', 'Render', 'Maqueta',
-  'Planta libre', 'Privado', 'Sala de reuniones', 'Auditorio', 'Archivo',
-  'Data center', 'Sala de servidores', 'Comedor de personal', 'Cocina office', 'Baños públicos',
-  'Lote', 'Terreno', 'Portón', 'Alambrado perimetral', 'Camino interno',
-  'Casa principal', 'Casa de caseros', 'Casa de huéspedes',
-  'Galpón', 'Depósito', 'Taller', 'Corrales', 'Manga', 'Caballerizas',
-  'Silo', 'Tanque de agua', 'Aguadas', 'Pozo de agua', 'Arroyo', 'Río', 'Laguna', 'Monte', 'Arboleda', 'Pastura', 'Cultivo',
-  'Club house', 'Garita de acceso', 'Seguridad', 'Circuito cerrado (CCTV)',
-  'Calles internas', 'Bicicletero', 'Cocheras de cortesía', 'Plaza central', 'Parque', 'Senderos',
-  'Cancha de tenis', 'Cancha de pádel', 'Cancha de fútbol', 'Multicancha', 'Laguna artificial',
-  'Local comercial', 'Isla comercial', 'Vidriera', 'Pasillo comercial', 'Hall central',
-  'Patio de comidas', 'Restaurante', 'Cafetería', 'Back office', 'Gerencia',
-  'Área de carga y descarga', 'Montacargas', 'Escalera mecánica', 'Ascensores', 'Terraza técnica', 'Cartelería', 'Tótem',
-  'Sala de máquinas', 'Tablero eléctrico', 'Grupo electrógeno',
-  'Otro'
-]
+- "ambiente": elige exactamente UNA de: [ {opciones} ].
+- "nivel": no es obligatorio que lo calcules; si lo incluyes, será ignorado. El servidor fijará el valor definitivo.
 - "etiquetas": lista corta (1 a 4) con palabras sencillas, por ejemplo:
-  ['iluminada', 'amplia', 'moderna', 'renovada', 'equipada', 'ordenada',
-   'con vista', 'ventilada', 'integrada', 'con isla', 'suite', 'placard',
-   'semi-cubierta', 'a estrenar', 'antigua', 'rústica']
-- Si no estás seguro del ambiente, usa 'otro'.
-- No inventes texto ni resúmenes; NO devuelvas imágenes ni base64.
-- Solo JSON válido.
-"""
+  ['iluminada','amplia','moderna','renovada','equipada','ordenada','con vista','ventilada','integrada',
+   'con isla','suite','placard','semi-cubierta','a estrenar','antigua','rústica']
+- Si no estás seguro del ambiente, usa 'Otro'.
+- Prohibido devolver texto fuera del JSON. Solo JSON válido.
+""".strip()
 
 def build_messages(image_parts):
-    # user.content debe ser la lista de imágenes para visión
     return [
-        {"role": "system", "content": SYSTEM_MSG},
+        {"role": "system", "content": build_system_msg()},
         {"role": "user",   "content": image_parts},
     ]
 
@@ -128,8 +127,6 @@ async def classify_simple(
     img46: UploadFile = File(None), img47: UploadFile = File(None), img48: UploadFile = File(None),
     img49: UploadFile = File(None), img50: UploadFile = File(None),
 ):
-    t0 = time.perf_counter()
-
     # Construir lista solo con imágenes válidas (en orden)
     raw_parts = [
         to_image_part(img1),  to_image_part(img2),  to_image_part(img3),  to_image_part(img4),  to_image_part(img5),
@@ -144,63 +141,53 @@ async def classify_simple(
         to_image_part(img46), to_image_part(img47), to_image_part(img48), to_image_part(img49), to_image_part(img50),
     ]
     image_parts = [p for p in raw_parts if p is not None]
-    logger.info(f"Imágenes válidas encontradas: {len(image_parts)}")
-
     if not image_parts:
         raise HTTPException(400, "Envía al menos una imagen válida (jpg/png).")
 
+    logger.info(f"Imágenes válidas encontradas: {len(image_parts)}")
+
     messages = build_messages(image_parts)
 
-    # ── Cálculo dinámico de tokens de salida ──────────────────────────────────
+    # Cálculo dinámico de tokens de salida
     per_image = 18      # estimado por fila (id + nivel + ambiente + etiquetas)
     base_overhead = 400 # cabecera y estructura JSON
     max_toks = min(base_overhead + per_image * len(image_parts), 3500)
-    logger.info(f"Llamando a OpenAI (modelo: {MODEL}, imgs: {len(image_parts)}, max_tokens: {max_toks})")
 
+    t0 = time.perf_counter()
     try:
         resp = openai.chat.completions.create(
             model=MODEL,
             messages=messages,
             temperature=0,
-            max_tokens=max_toks,                  # <- ajustado dinámicamente
+            max_tokens=max_toks,
             response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content
         data = json.loads(content)  # debe ser JSON válido
-        logger.info("JSON de respuesta de la IA:\n%s", json.dumps(data, ensure_ascii=False, indent=2))
 
-        # Métricas / uso
+        # ── Forzar NIVEL según nuestro ranking ────────────────────────────────
+        resultados = data.get("resultados") or []
+        for item in resultados:
+            amb = str(item.get("ambiente", "Otro")).strip() or "Otro"
+            if amb not in NIVEL_MAP:
+                # normalizar por case-insensitive si viene con distinta capitalización
+                amb = next((a for a in AMBIENTES if a.lower() == amb.lower()), "Otro")
+                item["ambiente"] = amb
+            item["nivel"] = NIVEL_MAP.get(amb, 1)
+
+        # Logs útiles
         elapsed = time.perf_counter() - t0
-        usage = getattr(resp, "usage", None)
-        prompt_toks = completion_toks = total_toks = None
-        try:
-            if usage:
-                # objeto o dict, manejamos ambos
-                prompt_toks = getattr(usage, "prompt_tokens", None) or (usage.get("prompt_tokens") if isinstance(usage, dict) else None)
-                completion_toks = getattr(usage, "completion_tokens", None) or (usage.get("completion_tokens") if isinstance(usage, dict) else None)
-                total_toks = getattr(usage, "total_tokens", None) or (usage.get("total_tokens") if isinstance(usage, dict) else None)
-        except Exception:
-            pass
-
-        logger.info(
-            f"OpenAI OK | resultados={len(data.get('resultados', []))} | "
-            f"tiempo={elapsed:.2f}s | tokens p={prompt_toks} c={completion_toks} t={total_toks}"
-        )
+        logger.info(f"OpenAI OK | resultados={len(resultados)} | t={elapsed:.2f}s | max_tokens={max_toks}")
+        logger.info("JSON IA:\n" + json.dumps(data, ensure_ascii=False, indent=2))
 
     except Exception as e:
         logger.exception("OpenAI error")
-        # Devuelve 500 con el texto del error para depurar rápidamente
         raise HTTPException(500, f"Error OpenAI: {e}")
 
-    # Opcional: agregar conteo
+    # Meta informativa
     data.setdefault("meta", {})
     data["meta"]["total_recibidas"] = len(raw_parts)
     data["meta"]["total_clasificadas"] = len(image_parts)
     data["meta"]["max_tokens_usados"] = max_toks
 
     return JSONResponse(content=data)
-
-# (Opcional para ejecutar local)
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8080)))

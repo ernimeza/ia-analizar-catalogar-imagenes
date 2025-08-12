@@ -74,36 +74,60 @@ def get_canonical(pt: str, override: Optional[List[str]] = None) -> List[str]:
 def model_schema() -> Dict[str, Any]:
     return {
         "type": "object",
+        "additionalProperties": False,   # ← requerido en el objeto raíz
         "properties": {
             "version": {"type": "string"},
             "property_type": {"type": "string"},
-            "canonical_order": {"type": "array","items":{"type":"string"}},
+            "canonical_order": {"type": "array", "items": {"type": "string"}},
             "images": {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "additionalProperties": False,
+                    "additionalProperties": False,  # ← también en cada item
                     "properties": {
-                        "id": {"type":"string"},
-                        "url": {"type":"string"},
-                        "primary_category": {"type":"string","enum": CATEGORIES},
-                        "secondary_labels": {"type":"array","items":{"type":"string"}},
-                        "confidence": {"type":"number"},
-                        "quality": {"type":"object"},
-                        "flags": {"type":"object"},
-                        "orientation": {"type":"string"},
-                        "alt_text": {"type":"string"},
-                        "tags": {"type":"array","items":{"type":"string"}},
-                        "order_index": {"type":"integer"},
-                        "is_cover": {"type":"boolean"}
+                        "id": {"type": "string"},
+                        "url": {"type": "string"},
+                        "primary_category": {"type": "string", "enum": CATEGORIES},
+                        "secondary_labels": {"type": "array", "items": {"type": "string"}},
+                        "confidence": {"type": "number"},
+                        "quality": {
+                            "type": "object",
+                            "additionalProperties": False,   # ← y aquí
+                            "properties": {
+                                "score": {"type": "number"},
+                                "lighting": {"type": "string"},
+                                "sharpness": {"type": "string"}
+                            }
+                        },
+                        "flags": {
+                            "type": "object",
+                            "additionalProperties": False,   # ← y aquí
+                            "properties": {
+                                "has_people": {"type": "boolean"},
+                                "has_text": {"type": "boolean"},
+                                "has_phone": {"type": "boolean"},
+                                "nsfw": {"type": "boolean"},
+                                "watermark": {"type": "boolean"},
+                                "duplicate": {"type": "boolean"},
+                                "floorplan": {"type": "boolean"}
+                            }
+                        },
+                        "orientation": {"type": "string"},
+                        "alt_text": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "order_index": {"type": "integer"},
+                        "is_cover": {"type": "boolean"}
                     },
-                    "required": ["id","url","primary_category","confidence","order_index","is_cover"]
+                    "required": [
+                        "id", "url", "primary_category", "confidence",
+                        "order_index", "is_cover"
+                    ]
                 }
             },
-            "cover_image_id": {"type":"string"},
-            "notes": {"type":"string"}
+            "cover_image_id": {"type": "string"},
+            "notes": {"type": "string"}
         },
-        "required": ["version","property_type","canonical_order","images"]
+        "required": ["version", "property_type", "canonical_order", "images"]
     }
 
 SYSTEM_PROMPT = """Eres un asistente que clasifica y ordena fotos inmobiliarias.

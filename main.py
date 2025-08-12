@@ -79,8 +79,10 @@ def model_schema() -> Dict[str, Any]:
         "properties": {
             "version": {"type": "string"},
             "property_type": {"type": "string"},
-            # Orden canónico que el modelo usó para decidir el orden final por categoría
-            "canonical_order": {"type": "array", "items": {"type": "string"}},
+            "canonical_order": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
             "images": {
                 "type": "array",
                 "items": {
@@ -91,16 +93,16 @@ def model_schema() -> Dict[str, Any]:
                         "url": {"type": "string"},
                         "primary_category": {
                             "type": "string",
-                            "enum": CATEGORIES  # usa tu lista de categorías (sala, comedor, baño, fachada, etc.)
+                            # tu lista/enum de categorías
+                            "enum": CATEGORIES
                         },
                         "secondary_labels": {
                             "type": "array",
                             "items": {"type": "string"}
                         },
-                        "order_index": {"type": "integer"},   # índice final (0..n) agrupando por categoría
-                        "is_cover":    {"type": "boolean"}    # true para la portada
+                        "order_index": {"type": "integer"},
+                        "is_cover":    {"type": "boolean"}
                     },
-                    # strict:true → todas las keys declaradas deben estar en required
                     "required": [
                         "id",
                         "url",
@@ -113,7 +115,8 @@ def model_schema() -> Dict[str, Any]:
             },
             "cover_image_id": {"type": "string"}
         },
-        "required": ["version", "property_type", "canonical_order", "images"]
+        # 👇 Agregamos cover_image_id acá
+        "required": ["version", "property_type", "canonical_order", "images", "cover_image_id"]
     }
 
 SYSTEM_PROMPT = """

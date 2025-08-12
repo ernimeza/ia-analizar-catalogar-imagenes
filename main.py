@@ -1,47 +1,53 @@
 import os, json, base64
+from io import BytesIO
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import openai, dotenv
+from PIL import Image  # <-- nuevo
 
 # ── Credenciales ──────────────────────────────────────────────────────────────
 dotenv.load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4o-mini-2024-07-18")
 
+# Config de reducción (podés tunear por env)
+MAX_SIDE = int(os.getenv("MAX_SIDE", "1024"))      # px lado mayor
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70"))  # 1-95
+
 app = FastAPI(title="Image Room Classifier (1-50 imágenes)")
 
 # ── Devuelve dict si es imagen válida, o None si viene vacío/no imagen ───────
-from io import BytesIO
-from PIL import Image
-
-MAX_SIDE = int(os.getenv("MAX_SIDE", "1024"))
-JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70"))
-
 def to_image_part(f: UploadFile):
     if not f:
         return None
     ct = (f.content_type or "").lower()
+    if not ct.startswith("image/"):
+        return None
     try:
         raw = f.file.read()
-        if not raw or not ct.startswith("image/"):
+        if not raw:
             return None
-        # abrir con PIL
+
+        # Abrir y normalizar con PIL
         im = Image.open(BytesIO(raw))
-        # manejar transparencias
-        if im.mode in ("RGBA", "LA"):
+        if im.mode in ("RGBA", "LA"):  # aplanar alfa sobre fondo blanco
             bg = Image.new("RGB", im.size, (255, 255, 255))
             bg.paste(im, mask=im.split()[-1])
             im = bg
         else:
             im = im.convert("RGB")
-        # resize manteniendo proporción
+
+        # Redimensionar manteniendo proporción
         im.thumbnail((MAX_SIDE, MAX_SIDE))
-        # recomprimir a JPEG
+
+        # Re-comprimir a JPEG liviano
         buf = BytesIO()
         im.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True)
-        b64 = base64.b64encode(buf.getvalue()).decode()
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
         return {
             "type": "image_url",
+            # detalle bajo para clasificación rápida
             "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}
         }
     except Exception:
@@ -66,112 +72,34 @@ Reglas:
 - "imagen_id" debe ser "imgN" (img1, img2, ...) respetando el orden de entrada.
 - "ambiente": elige exactamente UNA de:
   [
-  'Sala',
-  'Dormitorio',
-  'Dormitorio en suite',
-  'Cocina',
-  'Cocina integrada',
-  'Comedor',
-  'Baño',
-  'Toilette',
-  'Balcón',
-  'Patio',
-  'Jardín',
-  'Galería',
-  'Quincho',
-  'Parrilla',
-  'Pileta',
-  'Terraza',
-  'Cochera',
-  'Estacionamiento',
-  'Fachada',
-  'Contrafrente',
-  'Vista calle',
-  'Hall de entrada',
-  'Pasillo',
-  'Placard',
-  'Vestidor',
-  'Baulera',
-  'Laundry',
-  'Despensa',
-  'Altillo',
-  'Gimnasio',
-  'Salón de eventos',
-  'Juegos infantiles',
-  'Solarium',
-  'Sauna',
-  'Club house',
-  'Multicancha',
-  'Cancha de pádel',
-  'Cancha de tenis',
-  'Cancha de fútbol',
-  'Plaza central',
-  'Parque',
-  'Parque canino',
-  'Senderos',
-  'Roof garden',
-  'Terraza técnica',
-  'Seguridad',
-  'Circuito cerrado (CCTV)',
-  'Garita de acceso',
-  'Ascensores',
-  'Cochera subterránea',
-  'Estacionamiento visitantes',
-  'Cocheras de cortesía',
-  'Bicicletero',
-  'Escalera',
-  'Sótano',
-  'Tablero eléctrico',
-  'Grupo electrógeno',
-  'Sala de máquinas',
-  'Montacargas',
-  'Oficina',
-  'Privado',
-  'Recepción',
-  'Sala de reuniones',
-  'Gerencia',
-  'Back office',
-  'Archivo',
-  'Data center',
-  'Sala de servidores',
-  'Planta libre',
-  'Cowork',
-  'Local comercial',
-  'Pasillo comercial',
-  'Isla comercial',
-  'Patio de comidas',
-  'Cartelería',
-  'Auditorio',
-  'Salón',
-  'Terreno',
-  'Lote',
-  'Portón',
-  'Alambrado perimetral',
-  'Calles internas',
-  'Camino interno',
-  'Pozo de agua',
-  'Tanque de agua',
-  'Arboleda',
-  'Monte',
-  'Pastura',
-  'Cultivo',
-  'Corrales',
-  'Silo',
-  'Manga',
-  'Caballerizas',
-  'Galpón',
-  'Casa de huéspedes',
-  'Laguna',
-  'Laguna artificial',
-  'Río',
-  'Arroyo',
-  'Aguadas',
-  'Plano',
-  'Render',
-  'Maqueta',
-  'Otro'
+  'sala', 'comedor', 'cocina', 'cocina integrada', 'kitchenette',
+  'dormitorio', 'dormitorio en suite',
+  'baño', 'toilette',
+  'lavadero', 'despensa', 'baulera', 'placard', 'vestidor',
+  'home office', 'oficina', 'recepción', 'hall de entrada', 'pasillo',
+  'escalera', 'sótano', 'altillo',
+  'balcón', 'terraza', 'azotea', 'roof garden', 'galería',
+  'patio', 'jardín', 'quincho', 'asador',
+  'cochera', 'cochera subterránea', 'estacionamiento', 'estacionamiento visitantes',
+  'pileta', 'solarium', 'gimnasio', 'sauna', 'salón', 'salón de eventos',
+  'cowork', 'sala de juegos', 'juegos infantiles', 'laundry', 'parrilla', 'parque canino',
+  'fachada', 'vista calle', 'contrafrente',
+  'plano', 'render', 'maqueta',
+  'planta libre', 'privado', 'sala de reuniones', 'auditorio', 'archivo',
+  'data center', 'sala de servidores', 'comedor de personal', 'cocina office', 'baños públicos',
+  'lote', 'terreno', 'portón', 'alambrado perimetral', 'camino interno',
+  'casa principal', 'casa de caseros', 'casa de huéspedes',
+  'galpón', 'depósito', 'taller', 'corrales', 'manga', 'caballerizas',
+  'silo', 'tanque de agua', 'aguadas', 'pozo de agua', 'arroyo', 'río', 'laguna', 'monte', 'arboleda', 'pastura', 'cultivo',
+  'club house', 'garita de acceso', 'seguridad', 'circuito cerrado (CCTV)',
+  'calles internas', 'bicicletero', 'cocheras de cortesía', 'plaza central', 'parque', 'senderos',
+  'cancha de tenis', 'cancha de pádel', 'cancha de fútbol', 'multicancha', 'laguna artificial',
+  'local comercial', 'isla comercial', 'vidriera', 'pasillo comercial', 'hall central',
+  'patio de comidas', 'restaurante', 'cafetería', 'back office', 'gerencia',
+  'área de carga y descarga', 'montacargas', 'escalera mecánica', 'ascensores', 'terraza técnica', 'cartelería', 'tótem',
+  'sala de máquinas', 'tablero eléctrico', 'grupo electrógeno',
+  'otro'
 ]
-
 - "etiquetas": lista corta (1 a 4) con palabras sencillas, por ejemplo:
   ['iluminada', 'amplia', 'moderna', 'renovada', 'equipada', 'ordenada',
    'con vista', 'ventilada', 'integrada', 'con isla', 'suite', 'placard',
@@ -182,7 +110,6 @@ Reglas:
 """
 
 def build_messages(image_parts):
-    # user.content debe ser la lista de imágenes para visión
     return [
         {"role": "system", "content": SYSTEM_MSG},
         {"role": "user",   "content": image_parts},
@@ -210,7 +137,6 @@ async def classify_simple(
     img46: UploadFile = File(None), img47: UploadFile = File(None), img48: UploadFile = File(None),
     img49: UploadFile = File(None), img50: UploadFile = File(None),
 ):
-    # Construir lista solo con imágenes válidas (en orden)
     raw_parts = [
         to_image_part(img1),  to_image_part(img2),  to_image_part(img3),  to_image_part(img4),  to_image_part(img5),
         to_image_part(img6),  to_image_part(img7),  to_image_part(img8),  to_image_part(img9),  to_image_part(img10),
@@ -235,16 +161,14 @@ async def classify_simple(
             model=MODEL,
             messages=messages,
             temperature=0,
-            max_tokens=1000,  # suficiente para 50 filas cortas
-            response_format={"type": "json_object"},  # JSON garantizado
+            max_tokens=1000,
+            response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content
-        data = json.loads(content)  # debe ser JSON válido
+        data = json.loads(content)
     except Exception as e:
-        # Devuelve 500 con el texto del error para depurar rápidamente
         raise HTTPException(500, f"Error OpenAI: {e}")
 
-    # Opcional: agregar conteo
     data.setdefault("meta", {})
     data["meta"]["total_recibidas"] = len(raw_parts)
     data["meta"]["total_clasificadas"] = len(image_parts)

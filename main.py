@@ -167,7 +167,6 @@ async def classify_simple(
         )
         content = resp.choices[0].message.content
         data = json.loads(content)  # debe ser JSON válido
-        # Log del JSON devuelto por la IA (bonito/indentado)
         logger.info("JSON de respuesta de la IA:\n%s", json.dumps(data, ensure_ascii=False, indent=2))
 
         # Métricas / uso

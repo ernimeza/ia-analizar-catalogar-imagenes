@@ -172,7 +172,8 @@ Reglas:
             messages=messages,
             temperature=0,
             max_tokens=800,
-            response_format={"type": "json_schema", **JSON_SCHEMA},
+            response_format={"type": "json_schema", "json_schema": JSON_SCHEMA}
+,
         )
         content = resp.choices[0].message.content
         data = best_effort_json(content)  # robustez extra

@@ -11,23 +11,41 @@ MODEL = os.getenv("MODEL", "gpt-4o-mini-2024-07-18")
 app = FastAPI(title="Image Room Classifier (1-50 imágenes)")
 
 # ── Devuelve dict si es imagen válida, o None si viene vacío/no imagen ───────
+from io import BytesIO
+from PIL import Image
+
+MAX_SIDE = int(os.getenv("MAX_SIDE", "1024"))
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70"))
+
 def to_image_part(f: UploadFile):
     if not f:
         return None
     ct = (f.content_type or "").lower()
     try:
-        data = f.file.read()
+        raw = f.file.read()
+        if not raw or not ct.startswith("image/"):
+            return None
+        # abrir con PIL
+        im = Image.open(BytesIO(raw))
+        # manejar transparencias
+        if im.mode in ("RGBA", "LA"):
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            bg.paste(im, mask=im.split()[-1])
+            im = bg
+        else:
+            im = im.convert("RGB")
+        # resize manteniendo proporción
+        im.thumbnail((MAX_SIDE, MAX_SIDE))
+        # recomprimir a JPEG
+        buf = BytesIO()
+        im.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}
+        }
     except Exception:
         return None
-    if not data:
-        return None
-    if not ct.startswith("image/"):
-        return None
-    b64 = base64.b64encode(data).decode()
-    return {
-        "type": "image_url",
-        "image_url": {"url": f"data:{ct};base64,{b64}"}
-    }
 
 # ── Prompt del clasificador ───────────────────────────────────────────────────
 SYSTEM_MSG = """

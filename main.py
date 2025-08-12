@@ -72,12 +72,14 @@ def get_canonical(pt: str, override: Optional[List[str]] = None) -> List[str]:
     return override if override else CANONICALS.get(pt.lower().strip(), CANONICALS["apartment"])
 
 def model_schema() -> Dict[str, Any]:
+    # Esquema minimal: categoría, orden, portada y etiquetas secundarias
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "version": {"type": "string"},
             "property_type": {"type": "string"},
+            # Orden canónico que el modelo usó para decidir el orden final por categoría
             "canonical_order": {"type": "array", "items": {"type": "string"}},
             "images": {
                 "type": "array",
@@ -85,77 +87,58 @@ def model_schema() -> Dict[str, Any]:
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "id": {"type": "string"},
+                        "id":  {"type": "string"},
                         "url": {"type": "string"},
-                        "primary_category": {"type": "string", "enum": CATEGORIES},
-                        "secondary_labels": {"type": "array", "items": {"type": "string"}},
-                        "confidence": {"type": "number"},
-                        "quality": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "score": {"type": "number"},
-                                "lighting": {"type": "string"},
-                                "sharpness": {"type": "string"}
-                            },
-                            # strict:true → required debe incluir TODAS las keys de properties
-                            "required": ["score", "lighting", "sharpness"]
+                        "primary_category": {
+                            "type": "string",
+                            "enum": CATEGORIES  # usa tu lista de categorías (sala, comedor, baño, fachada, etc.)
                         },
-                        "flags": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "has_people": {"type": "boolean"},
-                                "has_text": {"type": "boolean"},
-                                "has_phone": {"type": "boolean"},
-                                "nsfw": {"type": "boolean"},
-                                "watermark": {"type": "boolean"},
-                                "duplicate": {"type": "boolean"},
-                                "floorplan": {"type": "boolean"}
-                            },
-                            "required": [
-                                "has_people",
-                                "has_text",
-                                "has_phone",
-                                "nsfw",
-                                "watermark",
-                                "duplicate",
-                                "floorplan"
-                            ]
+                        "secondary_labels": {
+                            "type": "array",
+                            "items": {"type": "string"}
                         },
-                        "orientation": {"type": "string"},
-                        "alt_text": {"type": "string"},
-                        "tags": {"type": "array", "items": {"type": "string"}},
-                        "order_index": {"type": "integer"},
-                        "is_cover": {"type": "boolean"}
+                        "order_index": {"type": "integer"},   # índice final (0..n) agrupando por categoría
+                        "is_cover":    {"type": "boolean"}    # true para la portada
                     },
+                    # strict:true → todas las keys declaradas deben estar en required
                     "required": [
                         "id",
                         "url",
                         "primary_category",
-                        "confidence",
-                        "quality",
-                        "flags",
+                        "secondary_labels",
                         "order_index",
                         "is_cover"
                     ]
                 }
             },
-            "cover_image_id": {"type": "string"},
-            "notes": {"type": "string"}
+            "cover_image_id": {"type": "string"}
         },
         "required": ["version", "property_type", "canonical_order", "images"]
     }
 
+SYSTEM_PROMPT = """
+Eres un asistente que clasifica y ordena fotos inmobiliarias.
 
-SYSTEM_PROMPT = """Eres un asistente que clasifica y ordena fotos inmobiliarias.
-Devuelves SOLO JSON válido según el esquema. Tareas:
-1) Categoriza cada imagen en UNA de las categorías permitidas.
-2) Detecta etiquetas útiles (tags), calidad básica y banderas (rostros, texto/teléfono, nsfw, watermark, floorplan).
-3) Sugiere ALT text por accesibilidad.
-4) Elige portada óptima y asigna order_index siguiendo el orden canónico entregado.
-5) Si la confianza es baja, usa 'other' y deja al final.
-No inventes información y no agregues campos fuera del esquema.
+Tareas:
+1) Asigna 'primary_category' a cada imagen usando este set cerrado (en español, minúsculas): 
+   sala, comedor, cocina, dormitorio, baño, pasillo, balcón, terraza, lavadero, quincho, patio,
+   jardín, fachada, garaje, amenities, plano, escritorio/oficina, depósito, otros.
+2) Agrega 'secondary_labels' (palabras clave cortas) si aplican, ej: 'vista a la ciudad', 
+   'isla de cocina', 'ducha', 'toilette', 'placard', 'parrilla', 'piscina', 'doble altura', etc.
+3) Ordena las imágenes agrupándolas por categoría y siguiendo el orden canónico del tipo de propiedad:
+   - departamento: sala/living → comedor → cocina → dormitorios → baños → balcón/terraza → lavadero → amenities → garaje → fachada → plano → otros
+   - casa: fachada → sala/living → comedor → cocina → dormitorios → baños → patio/jardín/quincho → lavadero → garaje → amenities → plano → otros
+   - oficina/local: fachada → sala principal → ambientes secundarios → baños → kitchenette → amenities → plano → otros
+   Devuelve ese orden en 'canonical_order' y usa 'order_index' (0..n) para cada imagen.
+4) Elige 'is_cover' = true en una sola imagen (la portada) priorizando: 
+   a) categoría atractiva (sala/living o fachada), 
+   b) composición centrada, 
+   c) buena iluminación aparente, 
+   d) ausencia de personas/textos/marcas visibles, 
+   e) que resuma mejor el valor de la propiedad.
+   Guarda su id en 'cover_image_id'.
+
+Formato de salida: sólo JSON que cumpla el esquema; no inventes categorías fuera del enum.
 """
 
 def build_user_content(property_type: str, canonical: List[str], image_parts: List[Dict[str, Any]]):

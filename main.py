@@ -74,7 +74,7 @@ def get_canonical(pt: str, override: Optional[List[str]] = None) -> List[str]:
 def model_schema() -> Dict[str, Any]:
     return {
         "type": "object",
-        "additionalProperties": False,   # ← requerido en el objeto raíz
+        "additionalProperties": False,
         "properties": {
             "version": {"type": "string"},
             "property_type": {"type": "string"},
@@ -83,7 +83,7 @@ def model_schema() -> Dict[str, Any]:
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "additionalProperties": False,  # ← también en cada item
+                    "additionalProperties": False,
                     "properties": {
                         "id": {"type": "string"},
                         "url": {"type": "string"},
@@ -92,16 +92,18 @@ def model_schema() -> Dict[str, Any]:
                         "confidence": {"type": "number"},
                         "quality": {
                             "type": "object",
-                            "additionalProperties": False,   # ← y aquí
+                            "additionalProperties": False,
                             "properties": {
                                 "score": {"type": "number"},
                                 "lighting": {"type": "string"},
                                 "sharpness": {"type": "string"}
-                            }
+                            },
+                            # strict:true → required debe incluir TODAS las keys de properties
+                            "required": ["score", "lighting", "sharpness"]
                         },
                         "flags": {
                             "type": "object",
-                            "additionalProperties": False,   # ← y aquí
+                            "additionalProperties": False,
                             "properties": {
                                 "has_people": {"type": "boolean"},
                                 "has_text": {"type": "boolean"},
@@ -110,7 +112,16 @@ def model_schema() -> Dict[str, Any]:
                                 "watermark": {"type": "boolean"},
                                 "duplicate": {"type": "boolean"},
                                 "floorplan": {"type": "boolean"}
-                            }
+                            },
+                            "required": [
+                                "has_people",
+                                "has_text",
+                                "has_phone",
+                                "nsfw",
+                                "watermark",
+                                "duplicate",
+                                "floorplan"
+                            ]
                         },
                         "orientation": {"type": "string"},
                         "alt_text": {"type": "string"},
@@ -119,8 +130,14 @@ def model_schema() -> Dict[str, Any]:
                         "is_cover": {"type": "boolean"}
                     },
                     "required": [
-                        "id", "url", "primary_category", "confidence",
-                        "order_index", "is_cover"
+                        "id",
+                        "url",
+                        "primary_category",
+                        "confidence",
+                        "quality",
+                        "flags",
+                        "order_index",
+                        "is_cover"
                     ]
                 }
             },
@@ -129,6 +146,7 @@ def model_schema() -> Dict[str, Any]:
         },
         "required": ["version", "property_type", "canonical_order", "images"]
     }
+
 
 SYSTEM_PROMPT = """Eres un asistente que clasifica y ordena fotos inmobiliarias.
 Devuelves SOLO JSON válido según el esquema. Tareas:

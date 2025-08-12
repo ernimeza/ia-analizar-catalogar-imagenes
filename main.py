@@ -1,5 +1,5 @@
 # main.py
-import os, io, json, base64, sys, time, logging, contextvars
+import os, json, base64, sys, logging, contextvars
 from typing import List, Dict, Any, Optional
 
 import dotenv
@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import httpx
-from openai import OpenAI
+from openai import OpenAI, BadRequestError
 
 # ───────── ENV & OpenAI ─────────
 dotenv.load_dotenv()
@@ -16,7 +16,7 @@ for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all
     os.environ.pop(k, None)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL = os.getenv("MODEL", "gpt-5-mini")  # cambia acá el modelo que quieras
+MODEL = os.getenv("MODEL", "gpt-5-mini")  # cambiá acá si querés otro modelo
 
 client = OpenAI(api_key=OPENAI_API_KEY, http_client=httpx.Client(timeout=30.0))
 
@@ -223,34 +223,72 @@ async def classify_upload(request: Request):
         {"role": "user", "content": build_user_content(property_type, canonical, image_parts)}
     ]
 
-    # Llamada OpenAI con fallback de parámetro
+    # ── OpenAI: fallback automático entre max_tokens / max_completion_tokens ──
     try:
+        # Intento 1: algunos modelos (GPT-5) exigen max_completion_tokens
+        logger.debug("OpenAI call: using max_completion_tokens")
         resp = client.chat.completions.create(
             model=MODEL,
             messages=messages,
             temperature=0,
-            max_tokens=2000,   # SDK estable (gpt-4o, gpt-5 si lo soporta)
+            max_completion_tokens=2000,
             response_format={
                 "type": "json_schema",
                 "json_schema": {"name": "ImageOrdering", "schema": model_schema(), "strict": True}
             }
         )
-    except Exception as e1:
-        if "max_tokens is not supported" in str(e1) or "Use max_completion_tokens instead" in str(e1):
+
+    except TypeError as e:  # el SDK local no acepta ese kwarg → usamos max_tokens
+        logger.warning(f"SDK TypeError ({e}); retry with max_tokens")
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0,
+            max_tokens=2000,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "ImageOrdering", "schema": model_schema(), "strict": True}
+            }
+        )
+
+    except BadRequestError as e:
+        msg = str(e); lower = msg.lower()
+        logger.warning(f"BadRequestError on first attempt: {msg}")
+
+        if (("unsupported_parameter" in lower and "max_completion_tokens" in lower) or
+            "unexpected keyword argument 'max_completion_tokens'" in lower):
+            # el modelo/SDK no acepta max_completion_tokens → probar max_tokens
+            logger.debug("Retrying with max_tokens")
             resp = client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
                 temperature=0,
-                max_completion_tokens=2000,  # fallback para modelos que lo exigen
+                max_tokens=2000,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "ImageOrdering", "schema": model_schema(), "strict": True}
+                }
+            )
+        elif (("unsupported_parameter" in lower and "max_tokens" in lower) or
+              "use 'max_completion_tokens' instead" in lower or
+              ("max_tokens" in lower and "not supported" in lower)):
+            # el modelo no acepta max_tokens → volver a intentar con max_completion_tokens
+            logger.debug("Retrying with max_completion_tokens")
+            resp = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=0,
+                max_completion_tokens=2000,
                 response_format={
                     "type": "json_schema",
                     "json_schema": {"name": "ImageOrdering", "schema": model_schema(), "strict": True}
                 }
             )
         else:
-            logger.exception(f"OpenAI error: {e1}")
-            raise HTTPException(502, f"Error llamando a OpenAI: {e1}")
+            logger.exception(f"OpenAI error (unhandled): {e}")
+            raise HTTPException(502, f"Error llamando a OpenAI: {e}")
 
+    # Parseo respuesta
     try:
         data = json.loads(resp.choices[0].message.content)
     except Exception as e:

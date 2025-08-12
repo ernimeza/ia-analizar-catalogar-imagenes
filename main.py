@@ -3,21 +3,22 @@ from io import BytesIO
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import openai, dotenv
-from PIL import Image  # <-- nuevo
+from PIL import Image
 
 # ── Credenciales ──────────────────────────────────────────────────────────────
 dotenv.load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4o-mini-2024-07-18")
 
-# Config de reducción (podés tunear por env)
-MAX_SIDE = int(os.getenv("MAX_SIDE", "1024"))      # px lado mayor
-JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70"))  # 1-95
+# Reducción de imagen (tuneable por env)
+MAX_SIDE = int(os.getenv("MAX_SIDE", "1024"))       # px lado mayor
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70")) # 1..95
 
 app = FastAPI(title="Image Room Classifier (1-50 imágenes)")
 
-# ── Devuelve dict si es imagen válida, o None si viene vacío/no imagen ───────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def to_image_part(f: UploadFile):
+    """Devuelve image_url vision con compresión/resize, o None si no es válida."""
     if not f:
         return None
     ct = (f.content_type or "").lower()
@@ -28,86 +29,119 @@ def to_image_part(f: UploadFile):
         if not raw:
             return None
 
-        # Abrir y normalizar con PIL
         im = Image.open(BytesIO(raw))
-        if im.mode in ("RGBA", "LA"):  # aplanar alfa sobre fondo blanco
+        # Normaliza a RGB y aplana alfa
+        if im.mode in ("RGBA", "LA"):
             bg = Image.new("RGB", im.size, (255, 255, 255))
             bg.paste(im, mask=im.split()[-1])
             im = bg
         else:
             im = im.convert("RGB")
 
-        # Redimensionar manteniendo proporción
+        # Resize proporcional
         im.thumbnail((MAX_SIDE, MAX_SIDE))
 
-        # Re-comprimir a JPEG liviano
+        # JPEG liviano
         buf = BytesIO()
         im.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True, progressive=True)
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
         return {
             "type": "image_url",
-            # detalle bajo para clasificación rápida
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{b64}",
+                "detail": "low"  # velocidad > super detalle
+            }
         }
     except Exception:
         return None
 
-# ── Prompt del clasificador ───────────────────────────────────────────────────
 SYSTEM_MSG = """
 Eres un asistente que CLASIFICA fotos de propiedades inmobiliarias.
 
-DEVUELVE EXCLUSIVAMENTE un JSON (sin texto extra) con esta estructura EXACTA:
+DEVUELVE EXCLUSIVAMENTE un JSON con:
 {
   "resultados": [
-    {
-      "imagen_id": "img1",
-      "ambiente": "<una de las opciones permitidas>",
-      "etiquetas": ["<etiqueta1>", "<etiqueta2>"]
-    }
+    { "imagen_id": "img1", "ambiente": "<opción>", "etiquetas": ["<tag1>", "<tag2>"] }
   ]
 }
 
 Reglas:
-- "imagen_id" debe ser "imgN" (img1, img2, ...) respetando el orden de entrada.
-- "ambiente": elige exactamente UNA de:
-  [
-  'sala', 'comedor', 'cocina', 'cocina integrada', 'kitchenette',
-  'dormitorio', 'dormitorio en suite',
-  'baño', 'toilette',
-  'lavadero', 'despensa', 'baulera', 'placard', 'vestidor',
-  'home office', 'oficina', 'recepción', 'hall de entrada', 'pasillo',
-  'escalera', 'sótano', 'altillo',
-  'balcón', 'terraza', 'azotea', 'roof garden', 'galería',
-  'patio', 'jardín', 'quincho', 'asador',
-  'cochera', 'cochera subterránea', 'estacionamiento', 'estacionamiento visitantes',
-  'pileta', 'solarium', 'gimnasio', 'sauna', 'salón', 'salón de eventos',
-  'cowork', 'sala de juegos', 'juegos infantiles', 'laundry', 'parrilla', 'parque canino',
-  'fachada', 'vista calle', 'contrafrente',
-  'plano', 'render', 'maqueta',
-  'planta libre', 'privado', 'sala de reuniones', 'auditorio', 'archivo',
-  'data center', 'sala de servidores', 'comedor de personal', 'cocina office', 'baños públicos',
-  'lote', 'terreno', 'portón', 'alambrado perimetral', 'camino interno',
-  'casa principal', 'casa de caseros', 'casa de huéspedes',
-  'galpón', 'depósito', 'taller', 'corrales', 'manga', 'caballerizas',
-  'silo', 'tanque de agua', 'aguadas', 'pozo de agua', 'arroyo', 'río', 'laguna', 'monte', 'arboleda', 'pastura', 'cultivo',
-  'club house', 'garita de acceso', 'seguridad', 'circuito cerrado (CCTV)',
-  'calles internas', 'bicicletero', 'cocheras de cortesía', 'plaza central', 'parque', 'senderos',
-  'cancha de tenis', 'cancha de pádel', 'cancha de fútbol', 'multicancha', 'laguna artificial',
-  'local comercial', 'isla comercial', 'vidriera', 'pasillo comercial', 'hall central',
-  'patio de comidas', 'restaurante', 'cafetería', 'back office', 'gerencia',
-  'área de carga y descarga', 'montacargas', 'escalera mecánica', 'ascensores', 'terraza técnica', 'cartelería', 'tótem',
-  'sala de máquinas', 'tablero eléctrico', 'grupo electrógeno',
-  'otro'
-]
-- "etiquetas": lista corta (1 a 4) con palabras sencillas, por ejemplo:
-  ['iluminada', 'amplia', 'moderna', 'renovada', 'equipada', 'ordenada',
-   'con vista', 'ventilada', 'integrada', 'con isla', 'suite', 'placard',
-   'semi-cubierta', 'a estrenar', 'antigua', 'rústica']
+- "imagen_id" es "imgN" en el mismo orden de entrada.
+- "ambiente": elegir UNA sola opción de la lista permitida.
+- "etiquetas": 1 a 4 palabras simples (ej.: 'iluminada','amplia','moderna','a estrenar','rústica').
 - Si no estás seguro del ambiente, usa 'otro'.
-- No inventes texto ni resúmenes; NO devuelvas imágenes ni base64.
-- Solo JSON válido.
+- Nada de texto adicional ni base64; solo JSON válido.
 """
+
+# Lista de ambientes (en minúsculas; debe coincidir con enum del esquema)
+AMBIENTES = [
+    'sala','comedor','cocina','cocina integrada','kitchenette',
+    'dormitorio','dormitorio en suite',
+    'baño','toilette',
+    'lavadero','despensa','baulera','placard','vestidor',
+    'home office','oficina','recepción','hall de entrada','pasillo',
+    'escalera','sótano','altillo',
+    'balcón','terraza','azotea','roof garden','galería',
+    'patio','jardín','quincho','asador',
+    'cochera','cochera subterránea','estacionamiento','estacionamiento visitantes',
+    'pileta','solarium','gimnasio','sauna','salón','salón de eventos',
+    'cowork','sala de juegos','juegos infantiles','laundry','parrilla','parque canino',
+    'fachada','vista calle','contrafrente',
+    'plano','render','maqueta',
+    'planta libre','privado','sala de reuniones','auditorio','archivo',
+    'data center','sala de servidores','comedor de personal','cocina office','baños públicos',
+    'lote','terreno','portón','alambrado perimetral','camino interno',
+    'casa principal','casa de caseros','casa de huéspedes',
+    'galpón','depósito','taller','corrales','manga','caballerizas',
+    'silo','tanque de agua','aguadas','pozo de agua','arroyo','río','laguna','monte','arboleda','pastura','cultivo',
+    'club house','garita de acceso','seguridad','circuito cerrado (CCTV)',
+    'calles internas','bicicletero','cocheras de cortesía','plaza central','parque','senderos',
+    'cancha de tenis','cancha de pádel','cancha de fútbol','multicancha','laguna artificial',
+    'local comercial','isla comercial','vidriera','pasillo comercial','hall central',
+    'patio de comidas','restaurante','cafetería','back office','gerencia',
+    'área de carga y descarga','montacargas','escalera mecánica','ascensores','terraza técnica','cartelería','tótem',
+    'sala de máquinas','tablero eléctrico','grupo electrógeno',
+    'otro'
+]
+
+# JSON Schema estricto para obligar salida válida
+JSON_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "ImageClassificationResults",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "resultados": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "imagen_id": {"type": "string"},
+                            "ambiente": {"type": "string", "enum": AMBIENTES},
+                            "etiquetas": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                                "maxItems": 4
+                            }
+                        },
+                        "required": ["imagen_id", "ambiente", "etiquetas"]
+                    }
+                },
+                "meta": {
+                    "type": "object",
+                    "additionalProperties": True
+                }
+            },
+            "required": ["resultados"]
+        },
+        "strict": True
+    }
+}
 
 def build_messages(image_parts):
     return [
@@ -115,7 +149,7 @@ def build_messages(image_parts):
         {"role": "user",   "content": image_parts},
     ]
 
-# ── Endpoint: acepta img1..img50 como archivos (opcionales) ──────────────────
+# ── Endpoint (img1..img50) ────────────────────────────────────────────────────
 @app.post("/classify-simple")
 @app.post("/extract-image")
 async def classify_simple(
@@ -162,13 +196,13 @@ async def classify_simple(
             messages=messages,
             temperature=0,
             max_tokens=1000,
-            response_format={"type": "json_object"},
+            response_format=JSON_SCHEMA,   # ⬅️ obliga JSON válido
         )
-        content = resp.choices[0].message.content
-        data = json.loads(content)
+        data = json.loads(resp.choices[0].message.content)
     except Exception as e:
         raise HTTPException(500, f"Error OpenAI: {e}")
 
+    # meta opcional
     data.setdefault("meta", {})
     data["meta"]["total_recibidas"] = len(raw_parts)
     data["meta"]["total_clasificadas"] = len(image_parts)

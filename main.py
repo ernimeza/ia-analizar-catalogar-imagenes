@@ -1,10 +1,10 @@
 # main.py
-import os, io, json, base64, time, sys, logging, contextvars
+import os, io, json, base64, sys, time, logging, contextvars
 from typing import List, Dict, Any, Optional
 from uuid import uuid4
 
 import dotenv
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -17,7 +17,7 @@ for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all
     os.environ.pop(k, None)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL = os.getenv("MODEL", "gpt-5-mini")  # gpt-4o-mini-2024-07-18 si querés ultra barato
+MODEL = os.getenv("MODEL", "gpt-5-mini")  # o gpt-4o-mini-2024-07-18
 
 client = OpenAI(api_key=OPENAI_API_KEY, http_client=httpx.Client(timeout=30.0))
 
@@ -124,40 +124,61 @@ def build_user_content(property_type: str, canonical: List[str], image_parts: Li
     return [intro] + image_parts
 
 # ────────── Helpers ──────────
-def file_to_image_part(f: UploadFile) -> Optional[Dict[str, Any]]:
-    """Devuelve un bloque para Chat Completions (image_url con data URI) o None."""
-    if not f:
+def is_upload_like(v: Any) -> bool:
+    return hasattr(v, "filename") and hasattr(v, "file")  # vale Starlette/FastAPI UploadFile
+
+def file_to_image_part(upload_obj) -> Optional[Dict[str, Any]]:
+    """Devuelve bloque {'type':'image_url','image_url':{'url':'data:...;base64,...'}} o None."""
+    if not is_upload_like(upload_obj):
         return None
-    ct = (f.content_type or "").lower()
+    ct = (getattr(upload_obj, "content_type", None) or "").lower()
     try:
-        data = f.file.read()
+        raw = upload_obj.file.read()
     except Exception:
         return None
-    if not data or not ct.startswith("image/"):
+    if not raw or not ct.startswith("image/"):
         return None
-    b64 = base64.b64encode(data).decode()
+    b64 = base64.b64encode(raw).decode()
     return {"type": "image_url", "image_url": {"url": f"data:{ct};base64,{b64}"}}
 
 def collect_images_from_form(form) -> List[Dict[str, Any]]:
     parts: List[Dict[str, Any]] = []
-    # img1..img50
+    # Primero intentamos img1..img50
     for i in range(1, 51):
-        f = form.get(f"img{i}")
-        if isinstance(f, UploadFile):
-            p = file_to_image_part(f)
+        v = form.get(f"img{i}")
+        if is_upload_like(v):
+            p = file_to_image_part(v)
             if p: parts.append(p)
-    # también aceptar cualquier key que empiece por 'img' por si agregás más
+    # Si nada, recorremos todas las keys que empiezan con img
     if not parts:
-        for key, val in form.items():
-            if isinstance(val, UploadFile) and str(key).lower().startswith("img"):
-                p = file_to_image_part(val)
+        for k, v in form.items():
+            if str(k).lower().startswith("img") and is_upload_like(v):
+                p = file_to_image_part(v)
                 if p: parts.append(p)
     return parts
 
 # ────────── Endpoints ──────────
 @app.get("/health")
 def health():
-    return {"ok": True, "model": MODEL, "openai_sdk": "OpenAI", "httpx": httpx.__version__}
+    return {"ok": True, "model": MODEL}
+
+@app.post("/debug-upload")
+async def debug_upload(request: Request):
+    """Devuelve qué llegó exactamente en el form (para depurar desde Bubble)."""
+    form = await request.form()
+    items = []
+    for k, v in form.items():
+        if is_upload_like(v):
+            items.append({"key": k, "type": "UploadFile", "filename": v.filename, "content_type": getattr(v, "content_type", None)})
+        else:
+            # para no romper si es objeto raro
+            try:
+                val = str(v)
+            except Exception:
+                val = f"<{type(v).__name__}>"
+            items.append({"key": k, "type": type(v).__name__, "value": val[:120]})
+    logger.debug("DEBUG UPLOAD FORM: " + json.dumps(items, ensure_ascii=False))
+    return {"received": items}
 
 @app.post("/classify-upload")
 async def classify_upload(request: Request):
@@ -165,21 +186,37 @@ async def classify_upload(request: Request):
         raise HTTPException(500, "Falta OPENAI_API_KEY")
 
     form = await request.form()
-    property_type = (form.get("property_type") or "apartment").strip().lower()
 
-    # canonical_order opcional (puede venir como JSON string o CSV)
+    # Log detallado de lo que llegó
+    log_items = []
+    for k, v in form.items():
+        if is_upload_like(v):
+            log_items.append({"k": k, "type": "UploadFile", "filename": v.filename, "content_type": getattr(v, "content_type", None)})
+        else:
+            try:
+                val = str(v)
+            except Exception:
+                val = f"<{type(v).__name__}>"
+            log_items.append({"k": k, "type": type(v).__name__, "value": val[:120]})
+    logger.debug("FORM FIELDS: " + json.dumps(log_items, ensure_ascii=False))
+
+    property_type = (str(form.get("property_type")) if form.get("property_type") else "apartment").strip().lower()
+
+    # canonical_order opcional
     canonical_override: Optional[List[str]] = None
     raw = form.get("canonical_order")
     if raw:
         try:
-            if raw.strip().startswith("["):
-                canonical_override = json.loads(raw)
+            s = str(raw)
+            if s.strip().startswith("["):
+                canonical_override = json.loads(s)
             else:
-                canonical_override = [s.strip() for s in raw.split(",") if s.strip()]
-        except Exception:
-            canonical_override = None
+                canonical_override = [x.strip() for x in s.split(",") if x.strip()]
+        except Exception as e:
+            logger.warning(f"No pude parsear canonical_order: {e}")
 
     image_parts = collect_images_from_form(form)
+    logger.debug(f"IMAGES FOUND: {len(image_parts)}")
     if not image_parts:
         raise HTTPException(400, "Envía al menos una imagen (img1..img50) como archivo.")
 
@@ -206,9 +243,9 @@ async def classify_upload(request: Request):
         logger.exception(f"OpenAI error: {e}")
         raise HTTPException(502, f"Error llamando a OpenAI: {e}")
 
-    # Forzamos version y property_type por si el modelo no los pone
     data.setdefault("version", "1.0")
     data["property_type"] = property_type
     data.setdefault("canonical_order", canonical)
 
+    logger.info(f"DONE classify images={len(data.get('images', []))}")
     return JSONResponse(content=data)

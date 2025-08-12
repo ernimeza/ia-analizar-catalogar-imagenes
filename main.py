@@ -1,5 +1,4 @@
-# main.py
-import os, json, base64, sys, logging, contextvars
+import os, sys, json, base64, logging, contextvars
 from typing import List, Dict, Any, Optional
 
 import dotenv
@@ -10,17 +9,20 @@ from fastapi.responses import JSONResponse
 import httpx
 from openai import OpenAI, BadRequestError
 
-# ───────── ENV & OpenAI ─────────
+# ──────────────────────────────── ENV / OpenAI ────────────────────────────────
 dotenv.load_dotenv()
-for k in ("HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","http_proxy","https_proxy","all_proxy"):
+for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
     os.environ.pop(k, None)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL = os.getenv("MODEL", "gpt-5-mini")  # cambia acá si querés otro modelo
+MODEL = os.getenv("MODEL", "gpt-4o-mini-2024-07-18")  # ← usamos el que ya te funcionaba
 
-client = OpenAI(api_key=OPENAI_API_KEY, http_client=httpx.Client(timeout=30.0))
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    http_client=httpx.Client(timeout=30.0),
+)
 
-# ───────── Logging con request-id ─────────
+# ──────────────────────────────── Logging ─────────────────────────────────────
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
 class RequestIdFilter(logging.Filter):
@@ -29,24 +31,31 @@ class RequestIdFilter(logging.Filter):
         return True
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
-logger = logging.getLogger("app"); logger.setLevel(LOG_LEVEL)
-_handler = logging.StreamHandler(sys.stdout); _handler.setLevel(LOG_LEVEL)
+logger = logging.getLogger("app")
+logger.setLevel(LOG_LEVEL)
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setLevel(LOG_LEVEL)
 _handler.addFilter(RequestIdFilter())
-_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | req=%(request_id)s | %(message)s",
-                                        datefmt="%Y-%m-%d %H:%M:%S"))
-logger.handlers = [_handler]; logger.propagate = False
+_handler.setFormatter(logging.Formatter(
+    "%(asctime)s | %(levelname)s | req=%(request_id)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+logger.handlers = [_handler]
+logger.propagate = False
 
-# ───────── FastAPI ─────────
+# ──────────────────────────────── FastAPI ─────────────────────────────────────
 app = FastAPI(
     title="Image Classifier & Sorter (Real Estate)",
-    docs_url="/docs", redoc_url="/redoc", openapi_url="/openapi.json"
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-# ───────── Taxonomía ─────────
+# ──────────────────────────────── Taxonomía ───────────────────────────────────
 CATEGORIES = [
     "facade_exterior","building_common","living_room","dining_room","kitchen",
     "bedroom","bathroom","home_office","laundry","garage","balcony_terrace",
@@ -57,12 +66,12 @@ CANONICALS = {
     "apartment": ["living_room","kitchen","bedroom","bathroom","balcony_terrace","amenity_pool_gym","building_common","facade_exterior","floorplan","map","other"],
     "land": ["facade_exterior","patio_garden","map","other"],
     "office": ["building_common","home_office","bathroom","kitchen","view_window","floorplan","map","other"],
-    "commercial": ["facade_exterior","building_common","home_office","bathroom","floorplan","map","other"]
+    "commercial": ["facade_exterior","building_common","home_office","bathroom","floorplan","map","other"],
 }
-def get_canonical(pt: str, override: Optional[List[str]]=None) -> List[str]:
+def get_canonical(pt: str, override: Optional[List[str]] = None) -> List[str]:
     return override if override else CANONICALS.get(pt.lower().strip(), CANONICALS["apartment"])
 
-def model_schema():
+def model_schema() -> Dict[str, Any]:
     return {
         "type": "object",
         "properties": {
@@ -122,7 +131,7 @@ def build_user_content(property_type: str, canonical: List[str], image_parts: Li
     }
     return [intro] + image_parts
 
-# ───────── Helpers (files) ─────────
+# ──────────────────────────────── Helpers (files) ─────────────────────────────
 def is_upload_like(v: Any) -> bool:
     return hasattr(v, "filename") and hasattr(v, "file")
 
@@ -141,13 +150,13 @@ def file_to_image_part(upload_obj) -> Optional[Dict[str, Any]]:
 
 def collect_images_from_form(form) -> List[Dict[str, Any]]:
     parts: List[Dict[str, Any]] = []
-    # img1..img50
+    # img1..img50 (como pediste)
     for i in range(1, 51):
         v = form.get(f"img{i}")
         if is_upload_like(v):
             p = file_to_image_part(v)
             if p: parts.append(p)
-    # fallback: cualquier key que empiece con img
+    # fallback por si vienen con otras keys
     if not parts:
         for k, v in form.items():
             if str(k).lower().startswith("img") and is_upload_like(v):
@@ -155,54 +164,7 @@ def collect_images_from_form(form) -> List[Dict[str, Any]]:
                 if p: parts.append(p)
     return parts
 
-# ───────── Utils OpenAI (fallback robusto) ─────────
-def _call_openai_with_param(messages, param_name: str, value: int = 2000):
-    kwargs = dict(
-        model=MODEL, messages=messages, temperature=0,
-        response_format={"type": "json_schema",
-                         "json_schema": {"name": "ImageOrdering",
-                                         "schema": model_schema(), "strict": True}}
-    )
-    if param_name == "max_tokens":
-        kwargs["max_tokens"] = value
-    else:
-        kwargs["max_completion_tokens"] = value
-    logger.debug(f"OpenAI call using {param_name}")
-    return client.chat.completions.create(**kwargs)
-
-def call_openai_with_fallback(messages):
-    """Prueba ambos parámetros y maneja errores del SDK y del servidor."""
-    errors = []
-
-    # Orden 1: max_completion_tokens luego max_tokens
-    for param in ("max_completion_tokens", "max_tokens"):
-        try:
-            return _call_openai_with_param(messages, param)
-        except TypeError as e:
-            # El SDK local no reconoce ese kwarg
-            logger.warning(f"SDK TypeError ({e}); trying other param…")
-            errors.append(f"{param}: TypeError {e}")
-            continue
-        except BadRequestError as e:
-            msg = str(e).lower()
-            # Si el servidor dice unsupported para este param, probamos el otro
-            if ("unsupported_parameter" in msg or "not supported" in msg
-                or "use 'max_completion_tokens' instead" in msg
-                or "unexpected keyword argument" in msg):
-                logger.warning(f"Server rejected {param}: {e}; trying other param…")
-                errors.append(f"{param}: BadRequest {e}")
-                continue
-            # Error real del contenido / otra cosa: lo propagamos
-            logger.exception(f"OpenAI BadRequest (unhandled): {e}")
-            raise HTTPException(502, f"Error llamando a OpenAI: {e}")
-        except Exception as e:
-            logger.exception(f"OpenAI error: {e}")
-            raise HTTPException(502, f"Error llamando a OpenAI: {e}")
-
-    # Si llegamos acá, ninguno funcionó
-    raise HTTPException(502, f"No compatible token parameter. Tried both. Details: {errors}")
-
-# ───────── Endpoints ─────────
+# ──────────────────────────────── Endpoints ───────────────────────────────────
 @app.get("/health")
 def health():
     return {"ok": True, "model": MODEL}
@@ -230,7 +192,7 @@ async def classify_upload(request: Request):
 
     form = await request.form()
 
-    # Log de lo recibido
+    # Log resumido de lo recibido
     log_items = []
     for k, v in form.items():
         if is_upload_like(v):
@@ -245,7 +207,6 @@ async def classify_upload(request: Request):
 
     property_type = (str(form.get("property_type")) if form.get("property_type") else "apartment").strip().lower()
 
-    # canonical_order opcional
     canonical_override: Optional[List[str]] = None
     raw = form.get("canonical_order")
     if raw:
@@ -270,10 +231,26 @@ async def classify_upload(request: Request):
         {"role": "user", "content": build_user_content(property_type, canonical, image_parts)}
     ]
 
-    # Llamada a OpenAI con fallback robusto
-    resp = call_openai_with_fallback(messages)
+    # ─── OpenAI (gpt-4o-mini usa max_tokens) ───
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0,
+            max_tokens=2000,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "ImageOrdering", "schema": model_schema(), "strict": True}
+            }
+        )
+    except BadRequestError as e:
+        logger.exception(f"OpenAI BadRequest: {e}")
+        raise HTTPException(502, f"Error llamando a OpenAI: {e}")
+    except Exception as e:
+        logger.exception(f"OpenAI error: {e}")
+        raise HTTPException(502, f"Error llamando a OpenAI: {e}")
 
-    # Parseo respuesta
+    # Parseo
     try:
         data = json.loads(resp.choices[0].message.content)
     except Exception as e:

@@ -17,22 +17,19 @@ from pydantic import BaseModel, Field
 import httpx
 from openai import OpenAI
 
-# ──────────────────────── ENV / OpenAI client ────────────────────────────────
+# ─────────────── ENV / OpenAI client ───────────────
 dotenv.load_dotenv()
 
-# Evitar proxies heredados del entorno (causan errores con httpx)
+# Evitar proxies heredados
 for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
     os.environ.pop(k, None)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-5-mini")  # o gpt-4o-mini-2024-07-18
-if not OPENAI_API_KEY:
-    print("WARNING: OPENAI_API_KEY no seteado")
 
-# Cliente OpenAI con httpx controlado
 client = OpenAI(api_key=OPENAI_API_KEY, http_client=httpx.Client(timeout=30.0))
 
-# ───────────────────────── Logging estructurado ──────────────────────────────
+# ─────────────── Logging ───────────────
 request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
 
 class RequestIdFilter(logging.Filter):
@@ -55,13 +52,11 @@ logger.propagate = False
 
 ENABLE_MODEL_DEBUG = os.getenv("ENABLE_MODEL_DEBUG", "false").lower() == "true"
 MAX_DEBUG_CHARS = int(os.getenv("MAX_DEBUG_CHARS", "3000"))
-
 def _trunc(s: str, n: int = MAX_DEBUG_CHARS) -> str:
-    if s is None:
-        return ""
+    if s is None: return ""
     return s if len(s) <= n else s[:n] + f"...(truncated {len(s)-n} chars)"
 
-# ─────────────────────────── FastAPI app ─────────────────────────────────────
+# ─────────────── FastAPI ───────────────
 app = FastAPI(
     title="Image Classifier & Sorter (Real Estate)",
     docs_url="/docs",
@@ -96,7 +91,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(LoggingMiddleware)
 
-# ─────────────────────────── Tipos (Pydantic) ────────────────────────────────
+# ─────────────── Modelos ───────────────
 class ClassifyRequest(BaseModel):
     property_id: Optional[str] = None
     property_type: str = Field(..., description="apartment | house | land | office | commercial")
@@ -127,7 +122,7 @@ class ClassifyResponse(BaseModel):
     cover_image_id: Optional[str] = None
     notes: Optional[str] = None
 
-# ─────────────────────────── Utilidades ──────────────────────────────────────
+# ─────────────── Utilidades ───────────────
 CANONICALS = {
     "house": ["facade_exterior","living_room","kitchen","bedroom","bathroom","patio_garden","amenity_pool_gym","garage","laundry","hallway","view_window","floorplan","map","other"],
     "apartment": ["living_room","kitchen","bedroom","bathroom","balcony_terrace","amenity_pool_gym","building_common","facade_exterior","floorplan","map","other"],
@@ -148,7 +143,6 @@ def get_canonical(pt: str, override: Optional[List[str]] = None) -> List[str]:
     return CANONICALS.get(pt.lower().strip(), CANONICALS["apartment"])
 
 def fetch_image_meta(url: str):
-    """Descarga imagen y calcula pHash/orientación/tamaño (best effort)."""
     try:
         r = requests.get(url, timeout=15)
         r.raise_for_status()
@@ -207,9 +201,8 @@ No inventes información y no agregues campos fuera del esquema.
 """
 
 def build_user_content(property_type: str, canonical: List[str], urls: List[str]):
-    """Arma el contenido multimodal para Chat Completions (texto + imágenes)."""
     parts: List[Dict[str, Any]] = []
-    intro = {
+    parts.append({
         "type": "text",
         "text": json.dumps({
             "property_type": property_type,
@@ -220,21 +213,15 @@ def build_user_content(property_type: str, canonical: List[str], urls: List[str]
                 "Apartment: living_room primero; House: facade_exterior primero"
             ]
         }, ensure_ascii=False)
-    }
-    parts.append(intro)
+    })
     for u in urls:
         parts.append({"type": "image_url", "image_url": {"url": u}})
     return parts
 
-# ─────────────────────────── Endpoints ───────────────────────────────────────
+# ─────────────── Endpoints ───────────────
 @app.get("/health")
 def health():
-    return {
-        "ok": True,
-        "model": MODEL,
-        "openai_sdk": getattr(client, "__class__", type(client)).__name__,
-        "httpx": httpx.__version__
-    }
+    return {"ok": True, "model": MODEL, "httpx": httpx.__version__}
 
 @app.post("/classify-images", response_model=ClassifyResponse)
 def classify(req: ClassifyRequest):
@@ -264,7 +251,7 @@ def classify(req: ClassifyRequest):
     try:
         resp = client.chat.completions.create(
             model=MODEL,
-            messages=models := messages,  # mantiene una ref por si logeamos
+            messages=messages,
             temperature=0,
             max_tokens=2000,
             response_format={
@@ -281,7 +268,7 @@ def classify(req: ClassifyRequest):
         raise HTTPException(502, f"Error llamando a OpenAI: {e}")
 
     # Enriquecer con pHash/orientación/tamaño
-    url_to_meta = {}
+    url_to_meta: Dict[str, Dict[str, Any]] = {}
     for u in urls:
         meta = fetch_image_meta(u)
         if meta:
@@ -309,4 +296,3 @@ def classify(req: ClassifyRequest):
 
     logger.info(f"DONE classify images={len(out.images)} cover={out.cover_image_id or '-'}")
     return out
-

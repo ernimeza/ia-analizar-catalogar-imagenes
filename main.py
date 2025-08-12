@@ -1,7 +1,15 @@
-import os, json, base64
+import os, json, base64, logging, sys, time
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import openai, dotenv
+
+# ── Logging para Railway ──────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("ia-classifier")
 
 # ── Credenciales ──────────────────────────────────────────────────────────────
 dotenv.load_dotenv()
@@ -9,6 +17,10 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4o-mini-2024-07-18")
 
 app = FastAPI(title="Image Room Classifier (1-50 imágenes)")
+
+@app.on_event("startup")
+def _on_startup():
+    logger.info(f"App iniciada | MODEL={MODEL}")
 
 # ── Devuelve dict si es imagen válida, o None si viene vacío/no imagen ───────
 def to_image_part(f: UploadFile):
@@ -116,6 +128,8 @@ async def classify_simple(
     img46: UploadFile = File(None), img47: UploadFile = File(None), img48: UploadFile = File(None),
     img49: UploadFile = File(None), img50: UploadFile = File(None),
 ):
+    t0 = time.perf_counter()
+
     # Construir lista solo con imágenes válidas (en orden)
     raw_parts = [
         to_image_part(img1),  to_image_part(img2),  to_image_part(img3),  to_image_part(img4),  to_image_part(img5),
@@ -130,6 +144,7 @@ async def classify_simple(
         to_image_part(img46), to_image_part(img47), to_image_part(img48), to_image_part(img49), to_image_part(img50),
     ]
     image_parts = [p for p in raw_parts if p is not None]
+    logger.info(f"Imágenes válidas encontradas: {len(image_parts)}")
 
     if not image_parts:
         raise HTTPException(400, "Envía al menos una imagen válida (jpg/png).")
@@ -140,6 +155,7 @@ async def classify_simple(
     per_image = 18      # estimado por fila (id + nivel + ambiente + etiquetas)
     base_overhead = 400 # cabecera y estructura JSON
     max_toks = min(base_overhead + per_image * len(image_parts), 3500)
+    logger.info(f"Llamando a OpenAI (modelo: {MODEL}, imgs: {len(image_parts)}, max_tokens: {max_toks})")
 
     try:
         resp = openai.chat.completions.create(
@@ -151,7 +167,27 @@ async def classify_simple(
         )
         content = resp.choices[0].message.content
         data = json.loads(content)  # debe ser JSON válido
+
+        # Métricas / uso
+        elapsed = time.perf_counter() - t0
+        usage = getattr(resp, "usage", None)
+        prompt_toks = completion_toks = total_toks = None
+        try:
+            if usage:
+                # objeto o dict, manejamos ambos
+                prompt_toks = getattr(usage, "prompt_tokens", None) or (usage.get("prompt_tokens") if isinstance(usage, dict) else None)
+                completion_toks = getattr(usage, "completion_tokens", None) or (usage.get("completion_tokens") if isinstance(usage, dict) else None)
+                total_toks = getattr(usage, "total_tokens", None) or (usage.get("total_tokens") if isinstance(usage, dict) else None)
+        except Exception:
+            pass
+
+        logger.info(
+            f"OpenAI OK | resultados={len(data.get('resultados', []))} | "
+            f"tiempo={elapsed:.2f}s | tokens p={prompt_toks} c={completion_toks} t={total_toks}"
+        )
+
     except Exception as e:
+        logger.exception("OpenAI error")
         # Devuelve 500 con el texto del error para depurar rápidamente
         raise HTTPException(500, f"Error OpenAI: {e}")
 
@@ -162,3 +198,8 @@ async def classify_simple(
     data["meta"]["max_tokens_usados"] = max_toks
 
     return JSONResponse(content=data)
+
+# (Opcional para ejecutar local)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8080)))

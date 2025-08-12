@@ -38,6 +38,7 @@ DEVUELVE EXCLUSIVAMENTE un JSON (sin texto extra) con esta estructura EXACTA:
   "resultados": [
     {
       "imagen_id": "img1",
+      "nivel": <entero 1-124>,
       "ambiente": "<una de las opciones permitidas>",
       "etiquetas": ["<etiqueta1>", "<etiqueta2>"]
     }

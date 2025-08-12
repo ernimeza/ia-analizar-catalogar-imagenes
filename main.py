@@ -39,7 +39,7 @@ DEVUELVE EXCLUSIVAMENTE un JSON (sin texto extra) con esta estructura EXACTA:
     {
       "imagen_id": "img1",
       "nivel": <entero 1-124>,
-      "ambiente": "<una de las opciones permitidas>",
+      "ambiente": "<una de las opciones permitidas con la primera letra en mayuscula>",
       "etiquetas": ["<etiqueta1>", "<etiqueta2>"]
     }
   ]
@@ -47,8 +47,8 @@ DEVUELVE EXCLUSIVAMENTE un JSON (sin texto extra) con esta estructura EXACTA:
 
 Reglas:
 - "imagen_id" debe ser "imgN" (img1, img2, ...) respetando el orden de entrada.
-- "Nivel" entero de 1 a 124 calculado por posición en la lista de ambientes (el primero vale 124 y el último vale 1); por ejemplo, 'sala' = 124 y 'otro' = 1.
-- "ambiente": elige exactamente UNA de:
+- "nivel" entero de 1 a 124 calculado por posición en la lista de ambientes (el primero vale 124 y el último vale 1); por ejemplo, 'sala' = 124 y 'otro' = 1.
+- "ambiente": elige exactamente UNA de estas opciones, pero devuelvela con la primera letra en mayuscula:
   [
   'sala', 'comedor', 'cocina', 'cocina integrada', 'kitchenette',
   'dormitorio', 'dormitorio en suite',

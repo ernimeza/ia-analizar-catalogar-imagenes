@@ -167,6 +167,7 @@ async def classify_simple(
         )
         content = resp.choices[0].message.content
         data = json.loads(content)  # debe ser JSON válido
+        logger.debug("RAW content de la IA: %s", content)
 
         # Métricas / uso
         elapsed = time.perf_counter() - t0

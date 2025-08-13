@@ -1,4 +1,4 @@
-import os, json, base64, time, logging
+import os, json, base64, asyncio, time, logging, re, random
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import openai, dotenv
@@ -8,14 +8,17 @@ dotenv.load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 MODEL = os.getenv("MODEL", "gpt-4o-mini-2024-07-18")
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging (Railway lee stdout) ──────────────────────────────────────────────
 logger = logging.getLogger("ia-classifier")
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
 logger.addHandler(handler)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
-app = FastAPI(title="Image Room Classifier (5 imágenes)")
+# Limitar concurrencia global hacia OpenAI (cámbialo por env si querés)
+SEM = asyncio.Semaphore(int(os.getenv("OAI_MAX_CONCURRENCY", "2")))
+
+app = FastAPI(title="Image Room Classifier (hasta 5 imágenes por request)")
 
 # ── Lista CANÓNICA de ambientes (mismo orden que en el prompt) ───────────────
 AMBIENTES_ORDER = [
@@ -65,9 +68,13 @@ def to_image_part(f: UploadFile):
     if not ct.startswith("image/"):
         return None
     b64 = base64.b64encode(data).decode()
-    return {"type": "image_url", "image_url": {"url": f"data:{ct};base64,{b64}"}}
+    # detail=low reduce costo/latencia en visión
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{ct};base64,{b64}", "detail": "low"}
+    }
 
-# ── Prompt del clasificador (simple) ─────────────────────────────────────────
+# ── Prompt del clasificador ───────────────────────────────────────────────────
 SYSTEM_MSG = f"""
 Eres un asistente que CLASIFICA fotos de propiedades inmobiliarias.
 
@@ -108,32 +115,67 @@ def build_messages(image_parts):
 
 def normalize_and_fill(block_data, count: int):
     out = []
-    resultados = block_data.get("resultados", []) if isinstance(block_data, dict) else []
+    resultados = []
+    if isinstance(block_data, dict):
+        resultados = block_data.get("resultados", [])
+    # Garantizar exactamente 'count' filas en orden
     for i in range(count):
         rec = resultados[i] if i < len(resultados) and isinstance(resultados[i], dict) else {}
+        # Ambiente normalizado
         amb_raw = (rec.get("ambiente") or "").strip()
         amb = LOWER_MAP.get(amb_raw.lower(), "Otro")
+        # Nivel forzado por nuestro mapa
         nivel = NIVEL_MAP.get(amb, 1)
+        # Etiquetas saneadas
         et = rec.get("etiquetas", [])
         if not isinstance(et, list):
             et = []
         etiquetas = []
         for x in et[:4]:
-            s = str(x).strip()
-            if s:
-                etiquetas.append(s)
+            try:
+                s = str(x).strip()
+                if s:
+                    etiquetas.append(s)
+            except Exception:
+                continue
         out.append({
-            "imagen_id": f"img{i+1}",
+            "imagen_id": f"img{1 + i}",
             "nivel": int(nivel),
             "ambiente": amb,
             "etiquetas": etiquetas,
         })
     return out
 
-# ── Endpoint: EXACTO 1..5 imágenes, una sola llamada al modelo ──────────────
+# ── Reintentos ante 429 ───────────────────────────────────────────────────────
+async def call_openai_with_retry(messages, max_tokens, retries=5):
+    delay = 1.2
+    for attempt in range(retries + 1):
+        try:
+            resp = openai.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=0,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+            return resp
+        except openai.RateLimitError as e:
+            m = re.search(r"in ([0-9]+(?:\.[0-9]+)?)s", str(e))
+            wait = float(m.group(1)) if m else delay
+            wait += random.uniform(0.1, 0.4)  # jitter
+            logger.warning(f"429 rate limit. Reintentando en {wait:.2f}s (intento {attempt+1}/{retries})")
+            await asyncio.sleep(wait)
+            delay = min(delay * 1.8, 10)
+        except Exception as e:
+            if attempt < retries:
+                logger.warning(f"Error OpenAI: {e}. Reintento en {delay:.2f}s (intento {attempt+1}/{retries})")
+                await asyncio.sleep(delay)
+                delay = min(delay * 1.6, 8)
+            else:
+                raise
+
+# ── Endpoint: hasta 5 imágenes (img1..img5) ──────────────────────────────────
 @app.post("/classify-5")
-@app.post("/classify-simple")   # por compatibilidad si tu front ya lo usa
-@app.post("/extract-image")     # por compatibilidad con el nombre viejo
 async def classify_5(
     img1: UploadFile = File(None),
     img2: UploadFile = File(None),
@@ -141,33 +183,33 @@ async def classify_5(
     img4: UploadFile = File(None),
     img5: UploadFile = File(None),
 ):
-    parts = [to_image_part(img1), to_image_part(img2), to_image_part(img3),
-             to_image_part(img4), to_image_part(img5)]
-    image_parts = [p for p in parts if p is not None]
+    raw_parts = [
+        to_image_part(img1),
+        to_image_part(img2),
+        to_image_part(img3),
+        to_image_part(img4),
+        to_image_part(img5),
+    ]
+    image_parts = [p for p in raw_parts if p is not None]
 
     if not image_parts:
         raise HTTPException(400, "Envía al menos una imagen válida (jpg/png).")
-    if len(image_parts) > 5:
-        raise HTTPException(400, "Máximo 5 imágenes por request.")
+
+    logger.info(f"Recibidas {len(image_parts)} imágenes para clasificar (hasta 5).")
 
     # Tokens de salida conservadores para 1..5 filas
-    per_image = 34
-    base_overhead = 220
-    max_tokens = min(base_overhead + per_image * len(image_parts), 1200)
+    per_image = 30
+    base_overhead = 200
+    max_tokens = min(base_overhead + per_image * len(image_parts), 900)
 
     messages = build_messages(image_parts)
 
     try:
         t0 = time.perf_counter()
-        resp = openai.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
+        async with SEM:  # limitar concurrencia hacia OpenAI
+            resp = await call_openai_with_retry(messages, max_tokens, retries=5)
         content = resp.choices[0].message.content
-        logger.debug(f"RAW OpenAI response: {content}")  # <- LOG del JSON crudo
+        logger.debug(f"RAW OpenAI response: {content}")
         data = json.loads(content)
         elapsed = time.perf_counter() - t0
         logger.info(f"classify-5 OK | imgs={len(image_parts)} | t={elapsed:.2f}s | max_tokens={max_tokens}")
@@ -175,13 +217,14 @@ async def classify_5(
         logger.error(f"OpenAI error: {e}")
         raise HTTPException(502, f"Error OpenAI: {e}")
 
-    resultados = normalize_and_fill(data, count=len(image_parts))
-
+    # Normalizar/forzar consistencia y empaquetar meta
+    fixed = normalize_and_fill(data, count=len(image_parts))
     out = {
-        "resultados": resultados,
+        "resultados": fixed,
         "meta": {
-            "count": len(image_parts),
-            "max_tokens": max_tokens
+            "total_recibidas": len(raw_parts),
+            "total_clasificadas": len(image_parts),
+            "max_tokens_usados": max_tokens
         }
     }
     return JSONResponse(content=out)

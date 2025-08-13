@@ -197,45 +197,56 @@ async def classify_5(
 
     logger.info(f"Recibidas {len(image_parts)} imágenes para clasificar (hasta 5).")
 
-    # Cálculo original conservado (meta)
+    # Tokens de salida conservadores para 1..5 filas
     per_image = 30
     base_overhead = 200
-    max_tokens_overall = min(base_overhead + per_image * len(image_parts), 900)
+    max_tokens = min(base_overhead + per_image * len(image_parts), 900)
 
-    # Para llamadas unitarias (1 imagen por request al modelo)
-    max_tokens_single = min(base_overhead + per_image * 1, 900)
-
-    t0 = time.perf_counter()
-    resultados_finales = []
+    messages = build_messages(image_parts)
 
     try:
-        # Clasificar **cada imagen por separado** para asegurar mapeo 1:1
-        for idx, part in enumerate(image_parts, start=1):
-            messages = build_messages([part])  # mantiene tu prompt y estilo
-            async with SEM:
-                resp = await call_openai_with_retry(messages, max_tokens_single, retries=5)
-            content = resp.choices[0].message.content
-            logger.debug(f"RAW OpenAI response (img{idx}): {content}")
-            data = json.loads(content)
-
-            # Normaliza y fuerza que este resultado sea para img{idx}
-            fixed_one = normalize_and_fill(data, count=1)[0]
-            fixed_one["imagen_id"] = f"img{idx}"  # asegura mapeo correcto
-            resultados_finales.append(fixed_one)
-
+        t0 = time.perf_counter()
+        async with SEM:  # limitar concurrencia hacia OpenAI
+            resp = await call_openai_with_retry(messages, max_tokens, retries=5)
+        content = resp.choices[0].message.content
+        logger.debug(f"RAW OpenAI response: {content}")
+        data = json.loads(content)
         elapsed = time.perf_counter() - t0
-        logger.info(f"classify-5 OK | imgs={len(image_parts)} | t={elapsed:.2f}s | max_tokens={max_tokens_overall}")
+        logger.info(f"classify-5 OK | imgs={len(image_parts)} | t={elapsed:.2f}s | max_tokens={max_tokens}")
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
         raise HTTPException(502, f"Error OpenAI: {e}")
 
-    # Empaquetar meta (sin cambios de estructura)
+    # Normalizar/forzar consistencia y empaquetar meta
+    fixed = normalize_and_fill(data, count=len(image_parts))
     out = {
-        "resultados": resultados_finales,
+        "resultados": fixed,
         "meta": {
             "total_recibidas": len(raw_parts),
             "total_clasificadas": len(image_parts),
-            "max_tokens_usados": max_tokens_overall
+            "max_tokens_usados": max_tokens
         }
     }
     return JSONResponse(content=out)
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response as _StarletteResponse
+import json as _json
+
+class _LogJSONMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        try:
+            parsed = _json.loads(body.decode())
+            logger.info("API RESPONSE JSON:\n" + _json.dumps(parsed, ensure_ascii=False, indent=2))
+        except Exception:
+            logger.info("API RESPONSE (raw): " + (body.decode(errors="ignore")[:2000] or "<vacío>"))
+        return _StarletteResponse(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+
+app.add_middleware(_LogJSONMiddleware)

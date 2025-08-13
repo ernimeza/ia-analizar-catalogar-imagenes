@@ -1,4 +1,4 @@
-import os, json, base64, asyncio, time, logging, re
+import os, json, base64, time, logging
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 import openai, dotenv
@@ -15,7 +15,7 @@ handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)
 logger.addHandler(handler)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
-app = FastAPI(title="Image Room Classifier (1-50 imágenes)")
+app = FastAPI(title="Image Room Classifier (5 imágenes)")
 
 # ── Lista CANÓNICA de ambientes (mismo orden que en el prompt) ───────────────
 AMBIENTES_ORDER = [
@@ -67,7 +67,7 @@ def to_image_part(f: UploadFile):
     b64 = base64.b64encode(data).decode()
     return {"type": "image_url", "image_url": {"url": f"data:{ct};base64,{b64}"}}
 
-# ── Prompt del clasificador ───────────────────────────────────────────────────
+# ── Prompt del clasificador (simple) ─────────────────────────────────────────
 SYSTEM_MSG = f"""
 Eres un asistente que CLASIFICA fotos de propiedades inmobiliarias.
 
@@ -95,12 +95,10 @@ Reglas:
 - No devuelvas imágenes/base64 ni texto fuera del JSON.
 """
 
-def build_messages(image_parts, start_idx):
-    # Inserta un texto de mapeo para que el modelo sepa qué imgN corresponde a cada imagen del chunk
+def build_messages(image_parts):
     mapping_text = (
         f"Estas {len(image_parts)} imágenes corresponden a los IDs "
-        f"img{start_idx}..img{start_idx+len(image_parts)-1} en ese orden. "
-        f"Devuelve 'resultados' en ese mismo orden."
+        f"img1..img{len(image_parts)} en ese orden. Devuelve 'resultados' en ese mismo orden."
     )
     user_content = [{"type": "text", "text": mapping_text}, *image_parts]
     return [
@@ -108,150 +106,82 @@ def build_messages(image_parts, start_idx):
         {"role": "user",   "content": user_content},
     ]
 
-# ── Normalización y relleno por bloque ────────────────────────────────────────
-def normalize_and_fill(block_data, start_idx: int, count: int):
+def normalize_and_fill(block_data, count: int):
     out = []
-    resultados = []
-    try:
-        if isinstance(block_data, dict):
-            resultados = block_data.get("resultados", [])
-        else:
-            resultados = []
-    except Exception:
-        resultados = []
-
-    # Buscar por posición (el modelo suele respetar el orden); si falta, usar {}.
+    resultados = block_data.get("resultados", []) if isinstance(block_data, dict) else []
     for i in range(count):
         rec = resultados[i] if i < len(resultados) and isinstance(resultados[i], dict) else {}
-
-        # Ambiente normalizado
         amb_raw = (rec.get("ambiente") or "").strip()
         amb = LOWER_MAP.get(amb_raw.lower(), "Otro")
-
-        # Nivel forzado por nuestro mapa
         nivel = NIVEL_MAP.get(amb, 1)
-
-        # Etiquetas saneadas
         et = rec.get("etiquetas", [])
         if not isinstance(et, list):
             et = []
         etiquetas = []
         for x in et[:4]:
-            try:
-                s = str(x).strip()
-                if s:
-                    etiquetas.append(s)
-            except Exception:
-                continue
-
+            s = str(x).strip()
+            if s:
+                etiquetas.append(s)
         out.append({
-            "imagen_id": f"img{start_idx + i}",
+            "imagen_id": f"img{i+1}",
             "nivel": int(nivel),
             "ambiente": amb,
             "etiquetas": etiquetas,
         })
-
     return out
 
-# ── Llamada por bloque con manejo de rate limit ──────────────────────────────
-async def classify_block(image_parts, start_idx, per_image_tokens=36, base_overhead=180, retries=4):
-    max_toks = min(base_overhead + per_image_tokens * len(image_parts), 900)
-    messages = build_messages(image_parts, start_idx)
-    delay = 1.5
-
-    for attempt in range(retries + 1):
-        try:
-            t0 = time.perf_counter()
-            resp = openai.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                temperature=0,
-                max_tokens=max_toks,
-                response_format={"type": "json_object"},
-            )
-            content = resp.choices[0].message.content
-            data = json.loads(content)
-            elapsed = time.perf_counter() - t0
-            logger.info(f"Chunk {start_idx}-{start_idx+len(image_parts)-1} OK | t={elapsed:.2f}s | max_tokens={max_toks}")
-            logger.debug(f"RAW chunk {start_idx}: {content}")
-            return data
-
-        except openai.RateLimitError as e:
-            m = re.search(r"in ([0-9]+(?:\.[0-9]+)?)s", str(e))
-            wait = float(m.group(1)) if m else delay
-            logger.warning(f"Rate limit 429 en chunk {start_idx}. Esperando {wait:.2f}s y reintentando (intento {attempt+1}/{retries})")
-            await asyncio.sleep(wait)
-            delay *= 1.6
-
-        except Exception as e:
-            logger.warning(f"Error en chunk {start_idx} (intento {attempt+1}/{retries}): {e}")
-            if attempt < retries:
-                await asyncio.sleep(delay)
-                delay *= 1.5
-            else:
-                raise
-
-# ── Endpoint: acepta img1..img50 como archivos (opcionales) ──────────────────
-@app.post("/classify-simple")
-@app.post("/extract-image")
-async def classify_simple(
-    img1: UploadFile = File(None),  img2: UploadFile = File(None),  img3: UploadFile = File(None),
-    img4: UploadFile = File(None),  img5: UploadFile = File(None),  img6: UploadFile = File(None),
-    img7: UploadFile = File(None),  img8: UploadFile = File(None),  img9: UploadFile = File(None),
-    img10: UploadFile = File(None), img11: UploadFile = File(None), img12: UploadFile = File(None),
-    img13: UploadFile = File(None), img14: UploadFile = File(None), img15: UploadFile = File(None),
-    img16: UploadFile = File(None), img17: UploadFile = File(None), img18: UploadFile = File(None),
-    img19: UploadFile = File(None), img20: UploadFile = File(None), img21: UploadFile = File(None),
-    img22: UploadFile = File(None), img23: UploadFile = File(None), img24: UploadFile = File(None),
-    img25: UploadFile = File(None), img26: UploadFile = File(None), img27: UploadFile = File(None),
-    img28: UploadFile = File(None), img29: UploadFile = File(None), img30: UploadFile = File(None),
-    img31: UploadFile = File(None), img32: UploadFile = File(None), img33: UploadFile = File(None),
-    img34: UploadFile = File(None), img35: UploadFile = File(None), img36: UploadFile = File(None),
-    img37: UploadFile = File(None), img38: UploadFile = File(None), img39: UploadFile = File(None),
-    img40: UploadFile = File(None), img41: UploadFile = File(None), img42: UploadFile = File(None),
-    img43: UploadFile = File(None), img44: UploadFile = File(None), img45: UploadFile = File(None),
-    img46: UploadFile = File(None), img47: UploadFile = File(None), img48: UploadFile = File(None),
-    img49: UploadFile = File(None), img50: UploadFile = File(None),
+# ── Endpoint: EXACTO 1..5 imágenes, una sola llamada al modelo ──────────────
+@app.post("/classify-5")
+@app.post("/classify-simple")   # por compatibilidad si tu front ya lo usa
+@app.post("/extract-image")     # por compatibilidad con el nombre viejo
+async def classify_5(
+    img1: UploadFile = File(None),
+    img2: UploadFile = File(None),
+    img3: UploadFile = File(None),
+    img4: UploadFile = File(None),
+    img5: UploadFile = File(None),
 ):
-    # Construir lista solo con imágenes válidas (en orden)
-    raw_parts = [
-        to_image_part(img1),  to_image_part(img2),  to_image_part(img3),  to_image_part(img4),  to_image_part(img5),
-        to_image_part(img6),  to_image_part(img7),  to_image_part(img8),  to_image_part(img9),  to_image_part(img10),
-        to_image_part(img11), to_image_part(img12), to_image_part(img13), to_image_part(img14), to_image_part(img15),
-        to_image_part(img16), to_image_part(img17), to_image_part(img18), to_image_part(img19), to_image_part(img20),
-        to_image_part(img21), to_image_part(img22), to_image_part(img23), to_image_part(img24), to_image_part(img25),
-        to_image_part(img26), to_image_part(img27), to_image_part(img28), to_image_part(img29), to_image_part(img30),
-        to_image_part(img31), to_image_part(img32), to_image_part(img33), to_image_part(img34), to_image_part(img35),
-        to_image_part(img36), to_image_part(img37), to_image_part(img38), to_image_part(img39), to_image_part(img40),
-        to_image_part(img41), to_image_part(img42), to_image_part(img43), to_image_part(img44), to_image_part(img45),
-        to_image_part(img46), to_image_part(img47), to_image_part(img48), to_image_part(img49), to_image_part(img50),
-    ]
-    image_parts_all = [p for p in raw_parts if p is not None]
+    parts = [to_image_part(img1), to_image_part(img2), to_image_part(img3),
+             to_image_part(img4), to_image_part(img5)]
+    image_parts = [p for p in parts if p is not None]
 
-    if not image_parts_all:
+    if not image_parts:
         raise HTTPException(400, "Envía al menos una imagen válida (jpg/png).")
+    if len(image_parts) > 5:
+        raise HTTPException(400, "Máximo 5 imágenes por request.")
 
-    total = len(image_parts_all)
-    logger.info(f"Imágenes válidas encontradas: {total}")
+    # Tokens de salida conservadores para 1..5 filas
+    per_image = 34
+    base_overhead = 220
+    max_tokens = min(base_overhead + per_image * len(image_parts), 1200)
 
-    # ── Procesar en bloques (secuencial) ──────────────────────────────────────
-    CHUNK_SIZE = 10  # si ves 429, baja a 8 o 6
-    resultados_finales = []
+    messages = build_messages(image_parts)
 
-    for i in range(0, total, CHUNK_SIZE):
-        chunk = image_parts_all[i:i+CHUNK_SIZE]
-        start_idx = 1 + i
-        block_data = await classify_block(chunk, start_idx)
-        fixed = normalize_and_fill(block_data, start_idx=start_idx, count=len(chunk))
-        resultados_finales.extend(fixed)
+    try:
+        t0 = time.perf_counter()
+        resp = openai.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        content = resp.choices[0].message.content
+        logger.debug(f"RAW OpenAI response: {content}")  # <- LOG del JSON crudo
+        data = json.loads(content)
+        elapsed = time.perf_counter() - t0
+        logger.info(f"classify-5 OK | imgs={len(image_parts)} | t={elapsed:.2f}s | max_tokens={max_tokens}")
+    except Exception as e:
+        logger.error(f"OpenAI error: {e}")
+        raise HTTPException(502, f"Error OpenAI: {e}")
 
-    data = {
-        "resultados": resultados_finales,
+    resultados = normalize_and_fill(data, count=len(image_parts))
+
+    out = {
+        "resultados": resultados,
         "meta": {
-            "total_recibidas": len(raw_parts),
-            "total_clasificadas": total,
-            "chunk_size": CHUNK_SIZE,
+            "count": len(image_parts),
+            "max_tokens": max_tokens
         }
     }
-
-    return JSONResponse(content=data)
+    return JSONResponse(content=out)

@@ -22,32 +22,7 @@ app = FastAPI(title="Image Room Classifier (hasta 5 imágenes por request)")
 
 # ── Lista CANÓNICA de ambientes (mismo orden que en el prompt) ───────────────
 AMBIENTES_ORDER = [
-  'Sala', 'Fachada', 'Dormitorio', 'Dormitorio en suite', 'Comedor', 'Cocina', 'Cocina integrada', 'Kitchenette',
-  'Baño', 'Toilette',
-  'Lavadero', 'Despensa', 'Baulera', 'Placard', 'Vestidor',
-  'Home office', 'Oficina', 'Recepción', 'Hall de entrada', 'Pasillo',
-  'Escalera', 'Sótano', 'Altillo',
-  'Balcón', 'Terraza', 'Azotea', 'Roof garden', 'Galería',
-  'Patio', 'Jardín', 'Quincho', 'Asador',
-  'Cochera', 'Cochera subterránea', 'Estacionamiento', 'Estacionamiento visitantes',
-  'Pileta', 'Solarium', 'Gimnasio', 'Sauna', 'Salón', 'Salón de eventos',
-  'Cowork', 'Sala de juegos', 'Juegos infantiles', 'Laundry', 'Parrilla', 'Parque canino',
-  'Vista calle', 'Contrafrente',
-  'Plano', 'Render', 'Maqueta',
-  'Planta libre', 'Privado', 'Sala de reuniones', 'Auditorio', 'Archivo',
-  'Data center', 'Sala de servidores', 'Comedor de personal', 'Cocina office', 'Baños públicos',
-  'Lote', 'Terreno', 'Portón', 'Alambrado perimetral', 'Camino interno',
-  'Casa principal', 'Casa de caseros', 'Casa de huéspedes',
-  'Galpón', 'Depósito', 'Taller', 'Corrales', 'Manga', 'Caballerizas',
-  'Silo', 'Tanque de agua', 'Aguadas', 'Pozo de agua', 'Arroyo', 'Río', 'Laguna', 'Monte', 'Arboleda', 'Pastura', 'Cultivo',
-  'Club house', 'Garita de acceso', 'Seguridad', 'Circuito cerrado (CCTV)',
-  'Calles internas', 'Bicicletero', 'Cocheras de cortesía', 'Plaza central', 'Parque', 'Senderos',
-  'Cancha de tenis', 'Cancha de pádel', 'Cancha de fútbol', 'Multicancha', 'Laguna artificial',
-  'Local comercial', 'Isla comercial', 'Vidriera', 'Pasillo comercial', 'Hall central',
-  'Patio de comidas', 'Restaurante', 'Cafetería', 'Back office', 'Gerencia',
-  'Área de carga y descarga', 'Montacargas', 'Escalera mecánica', 'Ascensores', 'Terraza técnica', 'Cartelería', 'Tótem',
-  'Sala de máquinas', 'Tablero eléctrico', 'Grupo electrógeno',
-  'Otro'
+  'Otro', 'Grupo electrógeno', 'Tablero eléctrico', 'Sala de máquinas', 'Tótem', 'Cartelería', 'Terraza técnica', 'Ascensores', 'Escalera mecánica', 'Montacargas', 'Área de carga y descarga', 'Gerencia', 'Back office', 'Cafetería', 'Restaurante', 'Patio de comidas', 'Hall central', 'Pasillo comercial', 'Vidriera', 'Isla comercial', 'Local comercial', 'Laguna artificial', 'Multicancha', 'Cancha de fútbol', 'Cancha de pádel', 'Cancha de tenis', 'Senderos', 'Parque', 'Plaza central', 'Cocheras de cortesía', 'Bicicletero', 'Calles internas', 'Circuito cerrado (CCTV)', 'Seguridad', 'Garita de acceso', 'Club house', 'Cultivo', 'Pastura', 'Arboleda', 'Monte', 'Laguna', 'Río', 'Arroyo', 'Pozo de agua', 'Aguadas', 'Tanque de agua', 'Silo', 'Caballerizas', 'Manga', 'Corrales', 'Taller', 'Depósito', 'Galpón', 'Casa de huéspedes', 'Casa de caseros', 'Casa principal', 'Camino interno', 'Alambrado perimetral', 'Portón', 'Terreno', 'Lote', 'Baños públicos', 'Cocina office', 'Comedor de personal', 'Sala de servidores', 'Data center', 'Archivo', 'Auditorio', 'Sala de reuniones', 'Privado', 'Planta libre', 'Maqueta', 'Render', 'Plano', 'Contrafrente', 'Vista calle', 'Parque canino', 'Parrilla', 'Laundry', 'Juegos infantiles', 'Sala de juegos', 'Cowork', 'Salón de eventos', 'Salón', 'Sauna', 'Gimnasio', 'Solarium', 'Pileta', 'Estacionamiento visitantes', 'Estacionamiento', 'Cochera subterránea', 'Cochera', 'Asador', 'Quincho', 'Jardín', 'Patio', 'Galería', 'Roof garden', 'Azotea', 'Terraza', 'Balcón', 'Altillo', 'Sótano', 'Escalera', 'Pasillo', 'Hall de entrada', 'Recepción', 'Oficina', 'Home office', 'Vestidor', 'Placard', 'Baulera', 'Despensa', 'Lavadero', 'Toilette', 'Baño', 'Kitchenette', 'Cocina integrada', 'Cocina', 'Comedor', 'Dormitorio en suite', 'Dormitorio', 'Fachada', 'Sala'
 ]
 N = len(AMBIENTES_ORDER)
 NIVEL_MAP = {amb: (N - idx) for idx, amb in enumerate(AMBIENTES_ORDER)}  # primero=N, último=1

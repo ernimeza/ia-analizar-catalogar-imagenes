@@ -22,8 +22,7 @@ app = FastAPI(title="Image Room Classifier (hasta 5 imágenes por request)")
 
 # ── Lista CANÓNICA de ambientes (mismo orden que en el prompt) ───────────────
 AMBIENTES_ORDER = [
-  'Sala', 'Fachada', 'Comedor', 'Cocina', 'Cocina integrada', 'Kitchenette',
-  'Dormitorio', 'Dormitorio en suite',
+  'Sala', 'Fachada', 'Dormitorio', 'Dormitorio en suite', 'Comedor', 'Cocina', 'Cocina integrada', 'Kitchenette',
   'Baño', 'Toilette',
   'Lavadero', 'Despensa', 'Baulera', 'Placard', 'Vestidor',
   'Home office', 'Oficina', 'Recepción', 'Hall de entrada', 'Pasillo',
